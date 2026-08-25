@@ -24,6 +24,11 @@ rcal is a command-line calendar application written in Rust that synchronizes wi
    - Interactive TUI for reviewing and adding events
    - CLI flags for non-interactive/automation use
    - Duplicate detection before adding
+   - **Conflict detection** against existing calendars:
+     - Check for overlapping time slots with existing events
+     - Show conflicting events with calendar source
+     - Warn about potential double-bookings
+     - Option to add anyway, skip, or modify time
 
 ### Additional Features
 
@@ -103,6 +108,11 @@ Import iCal (.ics) file.
 - **Interactive mode** (default): TUI with event list, checkboxes, and preview
 - **Non-interactive mode** (`--add`): Add all events directly
 - **Dry run** (`--dry-run`): Preview without adding
+- **Conflict checking**:
+  - Queries local database for overlapping events
+  - Shows warnings for time conflicts
+  - Displays conflicting event details (title, time, calendar)
+  - Allows user to resolve: add anyway, skip, or edit
 
 #### `sync`
 Synchronize with configured CalDAV server.
@@ -336,12 +346,42 @@ CREATE INDEX idx_events_uid ON events(uid);
 │ Found 5 events:                                                     │
 │                                                                      │
 │ ☑ Conference Talk 2024-03-15 10:00-12:00 (Personal)                │
+│ ⚠ CONFLICT: Team Standup 10:00-10:30 (Work)                        │
+│                                                                      │
 │ ☑ Workshop Day 2024-03-20 (All day) (Work)                         │
+│                                                                      │
 │ ☐ Old Meeting 2024-01-10 09:00-10:00 (Personal) [PAST]            │
+│                                                                      │
 │ ☑ Lunch Reservation 2024-02-14 12:00-13:00 (Personal)             │
+│ ⚠ CONFLICT: Lunch Meeting 12:30-13:30 (Work)                       │
+│                                                                      │
 │ ☑ Team Offsite 2024-04-01 to 2024-04-03 (All day) (Work)          │
 │                                                                      │
-│ [Add Selected]  [Add All]  [Cancel]                                 │
+│ ────────────────────────────────────────────────────────────────── │
+│ Conflicts: 2 events overlap with existing calendar events           │
+│                                                                      │
+│ [Add Selected]  [Add All (skip conflicts)]  [Cancel]               │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Conflict Resolution Dialog
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ Resolve Conflict: Conference Talk                                    │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│ New Event:                                                           │
+│   Conference Talk                                                    │
+│   2024-03-15 10:00 - 12:00 (Personal)                              │
+│                                                                      │
+│ Existing Event:                                                      │
+│   Team Standup                                                       │
+│   2024-03-15 10:00 - 10:30 (Work)                                  │
+│                                                                      │
+│ Overlap: 30 minutes (10:00 - 10:30)                                │
+│                                                                      │
+│ [Add Anyway]  [Skip]  [Edit Time]  [Cancel]                        │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
