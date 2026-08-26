@@ -1,5 +1,6 @@
 mod config;
 mod db;
+mod ical;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -104,11 +105,75 @@ async fn main() -> anyhow::Result<()> {
             add,
             dry_run,
         } => {
+            println!("Importing {:?} (add={}, dry_run={})", file, add, dry_run);
+
+            let calendar = ical::parse_ical_file(&file)?;
             println!(
-                "Importing {:?} (add={}, dry_run={})",
-                file, add, dry_run
+                "Parsed calendar: {}",
+                calendar.name.as_deref().unwrap_or("Unknown")
             );
-            // TODO: implement import
+            println!("Found {} events:", calendar.events.len());
+            println!();
+
+            for (i, event) in calendar.events.iter().enumerate() {
+                let time_str = match (&event.dtstart, &event.dtend) {
+                    (Some(start), Some(end)) => {
+                        if event.all_day {
+                            format!("All day ({} to {})", start.format("%Y-%m-%d"), end.format("%Y-%m-%d"))
+                        } else {
+                            format!(
+                                "{} to {}",
+                                start.format("%Y-%m-%d %H:%M"),
+                                end.format("%H:%M")
+                            )
+                        }
+                    }
+                    (Some(start), None) => {
+                        if event.all_day {
+                            format!("All day ({})", start.format("%Y-%m-%d"))
+                        } else {
+                            format!("{}", start.format("%Y-%m-%d %H:%M"))
+                        }
+                    }
+                    _ => "No time".to_string(),
+                };
+
+                let status_str = event
+                    .status
+                    .as_ref()
+                    .map(|s| format!(" [{}]", s))
+                    .unwrap_or_default();
+
+                let location_str = event
+                    .location
+                    .as_ref()
+                    .map(|l| format!(" @ {}", l))
+                    .unwrap_or_default();
+
+                println!(
+                    "{}. {}{}{} - {}",
+                    i + 1,
+                    event.summary,
+                    status_str,
+                    location_str,
+                    time_str
+                );
+
+                if let Some(desc) = &event.description {
+                    if !desc.is_empty() {
+                        println!("   Description: {}", desc);
+                    }
+                }
+            }
+
+            if dry_run {
+                println!("\nDry run: no events were added.");
+            } else if add {
+                println!("\nAdding all events...");
+                // TODO: implement adding events to database
+            } else {
+                println!("\nUse --add to add all events or --dry-run to preview.");
+            }
         }
         Commands::Sync => {
             println!("Syncing with CalDAV server...");
