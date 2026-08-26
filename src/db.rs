@@ -367,3 +367,308 @@ impl Database {
         self.get_events_in_range(start, end)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ical::CalendarEvent;
+
+    /// Open an in-memory database for testing
+    fn test_db() -> Database {
+        Database::open_from(Path::new(":memory:")).unwrap()
+    }
+
+    /// Create a test event with a given summary and time range
+    fn event(
+        uid: &str,
+        summary: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> CalendarEvent {
+        CalendarEvent {
+            uid: uid.to_string(),
+            summary: summary.to_string(),
+            description: Some(format!("Description for {}", summary)),
+            location: Some("Test Room".to_string()),
+            dtstart: Some(start),
+            dtend: Some(end),
+            all_day: false,
+            status: Some("CONFIRMED".to_string()),
+            recurrence: None,
+        }
+    }
+
+    fn dt(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, mo, d, h, mi, 0).single().unwrap()
+    }
+
+    #[test]
+    fn test_insert_and_retrieve_event() {
+        let db = test_db();
+        let e = event("uid-1", "Standup", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0));
+
+        db.insert_event(&e, None, None).unwrap();
+        assert!(db.event_exists("uid-1").unwrap());
+        assert!(!db.event_exists("non-existent").unwrap());
+
+        let events = db.get_all_events(None, None).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].uid, "uid-1");
+        assert_eq!(events[0].summary, "Standup");
+        assert_eq!(events[0].location.as_deref(), Some("Test Room"));
+        assert_eq!(
+            events[0].status.as_deref(),
+            Some("CONFIRMED")
+        );
+    }
+
+    #[test]
+    fn test_get_events_for_day() {
+        let db = test_db();
+        db.insert_event(
+            &event("uid-1", "Morning", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0)),
+            None,
+            None,
+        )
+        .unwrap();
+        db.insert_event(
+            &event("uid-2", "Next Day", dt(2024, 1, 16, 9, 0), dt(2024, 1, 16, 10, 0)),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let jan_15 = chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let events = db.get_events_for_day(jan_15).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].summary, "Morning");
+    }
+
+    #[test]
+    fn test_get_events_in_range_includes_spanning_events() {
+        let db = test_db();
+        // Event spanning multiple days (20:00 to 02:00 next day)
+        db.insert_event(
+            &event("uid-span", "Night Shift", dt(2024, 1, 15, 20, 0), dt(2024, 1, 16, 2, 0)),
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Query for the second day only - spanning event should still appear
+        let start = dt(2024, 1, 16, 0, 0);
+        let end = dt(2024, 1, 17, 0, 0);
+        let events = db.get_events_in_range(start, end).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].uid, "uid-span");
+
+        // Query for the first day - should also appear
+        let start = dt(2024, 1, 15, 0, 0);
+        let end = dt(2024, 1, 16, 0, 0);
+        let events = db.get_events_in_range(start, end).unwrap();
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn test_upsert_updates_existing_event() {
+        let db = test_db();
+        let original = event("uid-1", "Old Title", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0));
+        db.insert_event(&original, None, None).unwrap();
+
+        // Upsert with same UID but new data
+        let updated_event = event("uid-1", "New Title", dt(2024, 1, 15, 10, 0), dt(2024, 1, 15, 11, 0));
+        db.upsert_event(&updated_event, None, None).unwrap();
+
+        let events = db.get_all_events(None, None).unwrap();
+        assert_eq!(events.len(), 1, "Should not create duplicate");
+        assert_eq!(events[0].summary, "New Title");
+
+        // Verify time was updated
+        let expected_start = dt(2024, 1, 15, 10, 0).to_rfc3339();
+        assert_eq!(events[0].dtstart.unwrap().to_rfc3339(), expected_start);
+    }
+
+    #[test]
+    fn test_upsert_inserts_when_missing() {
+        let db = test_db();
+        let e = event("uid-1", "New Event", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0));
+
+        db.upsert_event(&e, None, None).unwrap();
+
+        assert!(db.event_exists("uid-1").unwrap());
+        let events = db.get_all_events(None, None).unwrap();
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn test_delete_event() {
+        let db = test_db();
+        let e = event("uid-1", "To Delete", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0));
+        db.insert_event(&e, None, None).unwrap();
+
+        assert!(db.event_exists("uid-1").unwrap());
+
+        db.delete_event("uid-1").unwrap();
+        assert!(!db.event_exists("uid-1").unwrap());
+        assert!(db.get_all_events(None, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_find_conflicts() {
+        let db = test_db();
+        db.insert_event(
+            &event("uid-1", "Existing Meeting", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0)),
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Overlapping range
+        let conflicts = db
+            .find_conflicts(dt(2024, 1, 15, 9, 30), dt(2024, 1, 15, 10, 30), None)
+            .unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].summary, "Existing Meeting");
+
+        // Non-overlapping range
+        let conflicts = db
+            .find_conflicts(dt(2024, 1, 15, 11, 0), dt(2024, 1, 15, 12, 0), None)
+            .unwrap();
+        assert!(conflicts.is_empty(), "Non-overlapping should not conflict");
+
+        // Adjacent (end == start) should NOT conflict
+        let conflicts = db
+            .find_conflicts(dt(2024, 1, 15, 10, 0), dt(2024, 1, 15, 11, 0), None)
+            .unwrap();
+        assert!(conflicts.is_empty(), "Adjacent events should not conflict");
+    }
+
+    #[test]
+    fn test_find_conflicts_excludes_own_uid() {
+        let db = test_db();
+        let e = event("uid-1", "My Event", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0));
+        db.insert_event(&e, None, None).unwrap();
+
+        db.insert_event(
+            &event("uid-2", "Other Event", dt(2024, 1, 15, 9, 30), dt(2024, 1, 15, 10, 30)),
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Excluding uid-1, we should still find uid-2
+        let conflicts = db
+            .find_conflicts(dt(2024, 1, 15, 9, 30), dt(2024, 1, 15, 10, 30), Some("uid-1"))
+            .unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].uid, "uid-2");
+
+        // Excluding uid-2, we should find uid-1
+        let conflicts = db
+            .find_conflicts(dt(2024, 1, 15, 9, 30), dt(2024, 1, 15, 10, 30), Some("uid-2"))
+            .unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].uid, "uid-1");
+
+        // Excluding a UID that doesn't exist should still return all
+        let conflicts = db
+            .find_conflicts(dt(2024, 1, 15, 9, 30), dt(2024, 1, 15, 10, 30), Some("ghost"))
+            .unwrap();
+        assert_eq!(conflicts.len(), 2);
+    }
+
+    #[test]
+    fn test_find_conflicts_by_uid_only_canonical() {
+        let db = test_db();
+        db.insert_event(
+            &event("uid-1", "Standup", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0)),
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Excluding the exact same UID should return no conflicts
+        let conflicts = db
+            .find_conflicts(dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0), Some("uid-1"))
+            .unwrap();
+        assert!(conflicts.is_empty(), "Self should never conflict");
+    }
+
+    #[test]
+    fn test_insert_calendar_and_get_all() {
+        let db = test_db();
+        db.insert_calendar("cal-1", "Personal", Some("#ff0000"), Some("My Personal"))
+            .unwrap();
+        db.insert_calendar("cal-2", "Work", Some("#00ff00"), None).unwrap();
+
+        let calendars = db.get_calendars().unwrap();
+        assert_eq!(calendars.len(), 2);
+
+        // Ordered by name: Personal, Work
+        assert_eq!(calendars[0].name, "Personal");
+        assert_eq!(calendars[1].name, "Work");
+
+        assert_eq!(calendars[0].color.as_deref(), Some("#ff0000"));
+        assert_eq!(calendars[0].display_name.as_deref(), Some("My Personal"));
+        assert_eq!(calendars[1].color.as_deref(), Some("#00ff00"));
+        assert_eq!(calendars[1].display_name, None);
+    }
+
+    #[test]
+    fn test_insert_calendar_replaces_existing() {
+        let db = test_db();
+        db.insert_calendar("cal-1", "Personal", None, None).unwrap();
+        db.insert_calendar("cal-1", "Personal Updated", None, None).unwrap();
+
+        let calendars = db.get_calendars().unwrap();
+        assert_eq!(calendars.len(), 1);
+        assert_eq!(calendars[0].name, "Personal Updated");
+    }
+
+    #[test]
+    fn test_get_all_events_with_filters() {
+        let db = test_db();
+        db.insert_event(
+            &event("uid-1", "Jan Event", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0)),
+            None,
+            None,
+        )
+        .unwrap();
+        db.insert_event(
+            &event("uid-2", "Feb Event", dt(2024, 2, 15, 9, 0), dt(2024, 2, 15, 10, 0)),
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Filter to February only
+        let from = dt(2024, 2, 1, 0, 0);
+        let to = dt(2024, 2, 29, 23, 59);
+        let events = db.get_all_events(Some(from), Some(to)).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].summary, "Feb Event");
+    }
+
+    #[test]
+    fn test_insert_event_roundtrip_preserves_details() {
+        let db = test_db();
+        let mut e = event("uid-1", "Rich Event", dt(2024, 3, 15, 10, 0), dt(2024, 3, 15, 12, 0));
+        e.description = Some("Long detailed description\nwith line breaks".to_string());
+        e.location = Some("Main Auditorium".to_string());
+        e.recurrence = Some("FREQ=YEARLY".to_string());
+        db.insert_event(&e, None, None).unwrap();
+
+        let events = db.get_all_events(None, None).unwrap();
+        assert_eq!(events[0].description.as_deref(), Some("Long detailed description\nwith line breaks"));
+        assert_eq!(events[0].location.as_deref(), Some("Main Auditorium"));
+        assert_eq!(events[0].recurrence.as_deref(), Some("FREQ=YEARLY"));
+        assert_eq!(events[0].status.as_deref(), Some("CONFIRMED"));
+    }
+
+    #[test]
+    fn test_invalid_uid_not_found() {
+        let db = test_db();
+        assert!(!db.event_exists("").unwrap());
+        assert!(!db.event_exists("   ").unwrap());
+    }
+}
