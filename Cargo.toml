@@ -1,0 +1,21 @@
+[package]
+name = "rcal"
+version = "0.1.0"
+edition = "2024"
+description = "A CLI calendar tool with CalDAV synchronization"
+license = "GPL-3.0"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dirs = "5"
+thiserror = "2"
+anyhow = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+[profile.release]
+opt-level = 3
+lto = true
