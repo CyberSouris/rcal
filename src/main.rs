@@ -1,7 +1,9 @@
 mod config;
 mod db;
+mod display;
 mod ical;
 
+use chrono::{Local, NaiveDate};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -85,20 +87,29 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Today => {
-            println!("Showing today's events...");
-            // TODO: implement today view
+            let events = load_events()?;
+            print!("{}", display::render_day(&events, Local::now().date_naive()));
         }
         Commands::Week { date } => {
-            println!("Showing week view for {:?}", date);
-            // TODO: implement week view
+            let events = load_events()?;
+            let start = match date {
+                Some(d) => parse_date(&d)?,
+                None => Local::now().date_naive(),
+            };
+            print!("{}", display::render_week(&events, start));
         }
         Commands::Month { month } => {
-            println!("Showing month view for {:?}", month);
-            // TODO: implement month view
+            let events = load_events()?;
+            let month_date = match month {
+                Some(m) => parse_month(&m)?,
+                None => Local::now().date_naive(),
+            };
+            print!("{}", display::render_month(&events, month_date));
         }
         Commands::Show { date } => {
-            println!("Showing events for {}", date);
-            // TODO: implement show command
+            let events = load_events()?;
+            let date = parse_date(&date)?;
+            print!("{}", display::render_day(&events, date));
         }
         Commands::Import {
             file,
@@ -194,4 +205,39 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Load events for display. Currently parses test.ics as a placeholder
+/// until database sync is implemented.
+fn load_events() -> anyhow::Result<Vec<ical::CalendarEvent>> {
+    let test_file = PathBuf::from("test.ics");
+    if test_file.exists() {
+        let calendar = ical::parse_ical_file(&test_file)?;
+        Ok(calendar.events)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+/// Parse a date string in YYYY-MM-DD format
+fn parse_date(s: &str) -> anyhow::Result<NaiveDate> {
+    NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .map_err(|_| anyhow::anyhow!("Invalid date format: {} (expected YYYY-MM-DD)", s))
+}
+
+/// Parse a month string in YYYY-MM format
+fn parse_month(s: &str) -> anyhow::Result<NaiveDate> {
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 2 {
+        anyhow::bail!("Invalid month format: {} (expected YYYY-MM)", s);
+    }
+    let year: i32 = parts[0]
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid year in: {} (expected YYYY-MM)", s))?;
+    let month: u32 = parts[1]
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid month in: {} (expected YYYY-MM)", s))?;
+
+    NaiveDate::from_ymd_opt(year, month, 1)
+        .ok_or_else(|| anyhow::anyhow!("Invalid month: {} (expected YYYY-MM)", s))
 }
