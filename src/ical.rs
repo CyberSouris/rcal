@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 /// Represents a parsed calendar event
@@ -31,6 +31,17 @@ pub fn parse_ical_file(path: &Path) -> Result<Calendar> {
         .with_context(|| format!("Failed to open iCal file: {}", path.display()))?;
 
     let reader = BufReader::new(file);
+    parse_ical_from_reader(reader)
+}
+
+/// Parse raw iCal text (e.g. from a CalDAV server response)
+pub fn parse_ical_text(content: &str) -> Result<Calendar> {
+    let reader = BufReader::new(std::io::Cursor::new(content.as_bytes()));
+    parse_ical_from_reader(reader)
+}
+
+/// Parse iCal from any reader
+pub fn parse_ical_from_reader<R: BufRead>(reader: R) -> Result<Calendar> {
     let parser = ical::IcalParser::new(reader);
 
     let mut calendar = Calendar {
@@ -60,7 +71,7 @@ pub fn parse_ical_file(path: &Path) -> Result<Calendar> {
 }
 
 /// Parse an IcalEvent into a CalendarEvent
-fn parse_event(ical_event: &ical::parser::ical::component::IcalEvent) -> Result<Option<CalendarEvent>> {
+pub(crate) fn parse_event(ical_event: &ical::parser::ical::component::IcalEvent) -> Result<Option<CalendarEvent>> {
     let mut uid = String::new();
     let mut summary = String::new();
     let mut description = None;
@@ -128,7 +139,7 @@ fn parse_event(ical_event: &ical::parser::ical::component::IcalEvent) -> Result<
 }
 
 /// Parse iCal datetime format (YYYYMMDD or YYYYMMDDTHHMMSSZ)
-fn parse_ical_datetime(value: &str) -> Result<DateTime<Utc>> {
+pub fn parse_ical_datetime(value: &str) -> Result<DateTime<Utc>> {
     if value.len() == 8 {
         // All-day event: YYYYMMDD
         let date = NaiveDate::parse_from_str(value, "%Y%m%d")

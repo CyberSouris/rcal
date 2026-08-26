@@ -1,3 +1,4 @@
+mod caldav;
 mod config;
 mod db;
 mod display;
@@ -124,8 +125,39 @@ async fn main() -> anyhow::Result<()> {
             handle_import(&file, add, dry_run)?;
         }
         Commands::Sync => {
-            println!("Syncing with CalDAV server...");
-            // TODO: implement sync
+            let config = config::Config::load()?;
+            let client = caldav::CalDavClient::new(&config)?;
+
+            println!("Discovering calendars at {} ...", config.server.url);
+            let calendars = client.discover_calendars().await?;
+            println!("Found {} calendar(s):", calendars.len());
+            for cal in &calendars {
+                let suffix = cal.color.as_deref().map(|c| format!(" [{}]", c)).unwrap_or_default();
+                println!("  {} ({}){}", cal.name, cal.href, suffix);
+            }
+            println!();
+
+            let db = db::Database::open()?;
+            let summary = client.sync(&db, &calendars).await?;
+
+            let mut total = 0usize;
+            for result in &summary.calendars {
+                println!(
+                    "  {}: +{} added, ~{} updated, {} unchanged, -{} deleted",
+                    result.name, result.added, result.updated, result.unchanged, result.deleted
+                );
+                total += result.added + result.updated + result.unchanged + result.deleted;
+            }
+            println!();
+            println!(
+                "Sync complete: +{} added, ~{} updated, {} unchanged, -{} deleted ({} events in {} calendars)",
+                summary.total_added,
+                summary.total_updated,
+                summary.total_unchanged,
+                summary.total_deleted,
+                total,
+                summary.calendars.len(),
+            );
         }
         Commands::New => {
             println!("Creating new event...");
@@ -179,10 +211,15 @@ async fn main() -> anyhow::Result<()> {
             let db = db::Database::open()?;
             let calendars = db.get_calendars()?;
             if calendars.is_empty() {
-                println!("No calendars. Use 'rcal import' to add events or configure CalDAV.");
+                println!("No calendars. Use 'rcal sync' to pull from a CalDAV server or 'rcal import' to add events.");
             } else {
                 for calendar in calendars {
-                    println!("{}", calendar.name);
+                    println!(
+                        "{} {:<28} {} event(s)",
+                        color_swatch(calendar.color.as_deref()),
+                        calendar.name,
+                        calendar.event_count
+                    );
                 }
             }
         }
@@ -272,16 +309,38 @@ fn handle_import(file: &std::path::Path, add: bool, dry_run: bool) -> anyhow::Re
         // Strip blank lines from the event for ical_data
         let ical_data = None;
         if db.event_exists(&event.uid)? {
-            db.upsert_event(event, None, ical_data)?;
+            db.upsert_event(event, None, ical_data, None)?;
             updated += 1;
         } else {
-            db.insert_event(event, None, ical_data)?;
+            db.insert_event(event, None, ical_data, None)?;
             added += 1;
         }
     }
 
     println!("\nDone: {} added, {} updated.", added, updated);
     Ok(())
+}
+
+/// Render a colored swatch for a hex calendar color (#RRGGBB)
+fn color_swatch(hex: Option<&str>) -> String {
+    match hex {
+        Some(h) if h.len() == 7 && h.starts_with('#') => {
+            match u8::from_str_radix(&h[1..3], 16)
+                .ok()
+                .zip(u8::from_str_radix(&h[3..5], 16).ok())
+                .zip(u8::from_str_radix(&h[5..7], 16).ok())
+            {
+                Some(((r, g), b)) => {
+                    // Choose black/white text for contrast
+                    let lum = 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
+                    let fg = if lum > 150.0 { 30 } else { 37 };
+                    format!("\x1b[48;2;{};{};{}m\x1b[{}m  \x1b[0m", r, g, b, fg)
+                }
+                None => "  ".to_string(),
+            }
+        }
+        _ => "  ".to_string(),
+    }
 }
 
 /// Format event time for import preview

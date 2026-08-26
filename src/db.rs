@@ -6,6 +6,15 @@ use std::path::Path;
 use crate::config::Config;
 use crate::ical::CalendarEvent;
 
+/// Raw event row as stored in the database, including sync metadata
+#[derive(Debug)]
+pub struct StoredEvent {
+    pub event: CalendarEvent,
+    pub calendar_id: Option<String>,
+    pub etag: Option<String>,
+    pub ical_data: Option<String>,
+}
+
 pub struct Database {
     conn: Connection,
 }
@@ -101,7 +110,14 @@ impl Database {
     pub fn get_calendars(&self) -> Result<Vec<Calendar>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, name, color, display_name FROM calendars ORDER BY name")?;
+            .prepare(
+                "SELECT c.id, c.name, c.color, c.display_name,
+                        COUNT(e.id) as event_count
+                 FROM calendars c
+                 LEFT JOIN events e ON e.calendar_id = c.id
+                 GROUP BY c.id
+                 ORDER BY c.name",
+            )?;
 
         let rows = stmt.query_map([], |row| {
             Ok(Calendar {
@@ -109,7 +125,7 @@ impl Database {
                 name: row.get(1)?,
                 color: row.get(2)?,
                 display_name: row.get(3)?,
-                event_count: 0,
+                event_count: row.get::<_, i64>(4)? as usize,
             })
         })?;
 
@@ -125,13 +141,14 @@ impl Database {
         event: &CalendarEvent,
         calendar_id: Option<&str>,
         ical_data: Option<&str>,
+        etag: Option<&str>,
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
             "INSERT OR REPLACE INTO events
              (id, calendar_id, uid, summary, description, location,
-              dtstart, dtend, all_day, status, recurrence, ical_data, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+              dtstart, dtend, all_day, status, recurrence, ical_data, etag, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 event.uid.clone(),
                 calendar_id,
@@ -145,6 +162,7 @@ impl Database {
                 event.status,
                 event.recurrence,
                 ical_data,
+                etag,
                 now,
             ],
         )?;
@@ -276,6 +294,7 @@ impl Database {
         event: &CalendarEvent,
         calendar_id: Option<&str>,
         ical_data: Option<&str>,
+        etag: Option<&str>,
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
 
@@ -290,6 +309,8 @@ impl Database {
                 status = ?8,
                 recurrence = ?9,
                 ical_data = ?10,
+                calendar_id = ?12,
+                etag = ?13,
                 updated_at = ?11,
                 last_modified = ?11
              WHERE uid = ?1",
@@ -305,11 +326,13 @@ impl Database {
                 event.recurrence,
                 ical_data,
                 now,
+                calendar_id,
+                etag,
             ],
         )?;
 
         if updated == 0 {
-            self.insert_event(event, calendar_id, ical_data)?;
+            self.insert_event(event, calendar_id, ical_data, etag)?;
         }
 
         Ok(())
@@ -320,27 +343,85 @@ impl Database {
         self.conn.execute("DELETE FROM events WHERE uid = ?1", params![uid])?;
         Ok(())
     }
+
+    /// Get all events belonging to a specific calendar, with sync metadata
+    pub fn get_events_for_calendar(&self, calendar_id: &str) -> Result<Vec<StoredEvent>> {
+        let sql = "SELECT uid, summary, description, location,
+                          dtstart, dtend, all_day, status, recurrence,
+                          calendar_id, etag, ical_data
+                   FROM events
+                   WHERE calendar_id = ?1
+                     AND dtstart IS NOT NULL
+                   ORDER BY dtstart";
+
+        let mut stmt = self.conn.prepare(sql)?;
+
+        let rows = stmt.query_map(params![calendar_id], |row| {
+            let calendar_id: Option<String> = row.get(9)?;
+            let etag: Option<String> = row.get(10)?;
+            let ical_data: Option<String> = row.get(11)?;
+
+            Ok(StoredEvent {
+                event: event_stub_from_row(row),
+                calendar_id,
+                etag,
+                ical_data,
+            })
+        })?;
+
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("Failed to fetch calendar events")
+    }
+
+    /// Get the etag stored for an event, if any
+    pub fn get_event_etag(&self, uid: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare("SELECT etag FROM events WHERE uid = ?1")?;
+        let etag: Option<String> = stmt.query_row(params![uid], |row| row.get(0)).ok();
+        Ok(etag)
+    }
+
+    /// Set sync metadata (calendar_id, etag, ical_data) for an existing event
+    pub fn set_sync_metadata(
+        &self,
+        uid: &str,
+        calendar_id: &str,
+        etag: Option<&str>,
+        ical_data: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE events SET calendar_id = ?2, etag = ?3, ical_data = ?4,
+                 synced_at = CURRENT_TIMESTAMP
+             WHERE uid = ?1",
+            params![uid, calendar_id, etag, ical_data],
+        )?;
+        Ok(())
+    }
 }
 
-/// Map a database row to a CalendarEvent
-fn map_event_row(row: &rusqlite::Row) -> rusqlite::Result<CalendarEvent> {
-    let dtstart: Option<String> = row.get(4)?;
-    let dtend: Option<String> = row.get(5)?;
-    let all_day: bool = row.get(6)?;
+/// Map the event portion of a database row (columns 0-8) to a CalendarEvent
+fn event_stub_from_row(row: &rusqlite::Row) -> CalendarEvent {
+    let dtstart: Option<String> = row.get(4).unwrap_or(None);
+    let dtend: Option<String> = row.get(5).unwrap_or(None);
+    let all_day: bool = row.get(6).unwrap_or(false);
 
-    Ok(CalendarEvent {
-        uid: row.get(0)?,
-        summary: row.get(1)?,
-        description: row.get(2)?,
-        location: row.get(3)?,
+    CalendarEvent {
+        uid: row.get(0).unwrap_or_default(),
+        summary: row.get(1).unwrap_or_default(),
+        description: row.get(2).unwrap_or(None),
+        location: row.get(3).unwrap_or(None),
         dtstart: dtstart.and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
             .map(|d| d.with_timezone(&Utc)),
         dtend: dtend.and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
             .map(|d| d.with_timezone(&Utc)),
         all_day,
-        status: row.get(7)?,
-        recurrence: row.get(8)?,
-    })
+        status: row.get(7).unwrap_or(None),
+        recurrence: row.get(8).unwrap_or(None),
+    }
+}
+
+/// Map a database row to a CalendarEvent
+fn map_event_row(row: &rusqlite::Row) -> rusqlite::Result<CalendarEvent> {
+    Ok(event_stub_from_row(row))
 }
 
 /// Calendar metadata (as stored in the database)
@@ -407,7 +488,7 @@ mod tests {
         let db = test_db();
         let e = event("uid-1", "Standup", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0));
 
-        db.insert_event(&e, None, None).unwrap();
+        db.insert_event(&e, None, None, None).unwrap();
         assert!(db.event_exists("uid-1").unwrap());
         assert!(!db.event_exists("non-existent").unwrap());
 
@@ -429,10 +510,12 @@ mod tests {
             &event("uid-1", "Morning", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0)),
             None,
             None,
+            None,
         )
         .unwrap();
         db.insert_event(
             &event("uid-2", "Next Day", dt(2024, 1, 16, 9, 0), dt(2024, 1, 16, 10, 0)),
+            None,
             None,
             None,
         )
@@ -450,6 +533,7 @@ mod tests {
         // Event spanning multiple days (20:00 to 02:00 next day)
         db.insert_event(
             &event("uid-span", "Night Shift", dt(2024, 1, 15, 20, 0), dt(2024, 1, 16, 2, 0)),
+            None,
             None,
             None,
         )
@@ -473,11 +557,11 @@ mod tests {
     fn test_upsert_updates_existing_event() {
         let db = test_db();
         let original = event("uid-1", "Old Title", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0));
-        db.insert_event(&original, None, None).unwrap();
+        db.insert_event(&original, None, None, None).unwrap();
 
         // Upsert with same UID but new data
         let updated_event = event("uid-1", "New Title", dt(2024, 1, 15, 10, 0), dt(2024, 1, 15, 11, 0));
-        db.upsert_event(&updated_event, None, None).unwrap();
+        db.upsert_event(&updated_event, None, None, None).unwrap();
 
         let events = db.get_all_events(None, None).unwrap();
         assert_eq!(events.len(), 1, "Should not create duplicate");
@@ -493,7 +577,7 @@ mod tests {
         let db = test_db();
         let e = event("uid-1", "New Event", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0));
 
-        db.upsert_event(&e, None, None).unwrap();
+        db.upsert_event(&e, None, None, None).unwrap();
 
         assert!(db.event_exists("uid-1").unwrap());
         let events = db.get_all_events(None, None).unwrap();
@@ -504,7 +588,7 @@ mod tests {
     fn test_delete_event() {
         let db = test_db();
         let e = event("uid-1", "To Delete", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0));
-        db.insert_event(&e, None, None).unwrap();
+        db.insert_event(&e, None, None, None).unwrap();
 
         assert!(db.event_exists("uid-1").unwrap());
 
@@ -518,6 +602,7 @@ mod tests {
         let db = test_db();
         db.insert_event(
             &event("uid-1", "Existing Meeting", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0)),
+            None,
             None,
             None,
         )
@@ -547,10 +632,11 @@ mod tests {
     fn test_find_conflicts_excludes_own_uid() {
         let db = test_db();
         let e = event("uid-1", "My Event", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0));
-        db.insert_event(&e, None, None).unwrap();
+        db.insert_event(&e, None, None, None).unwrap();
 
         db.insert_event(
             &event("uid-2", "Other Event", dt(2024, 1, 15, 9, 30), dt(2024, 1, 15, 10, 30)),
+            None,
             None,
             None,
         )
@@ -582,6 +668,7 @@ mod tests {
         let db = test_db();
         db.insert_event(
             &event("uid-1", "Standup", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0)),
+            None,
             None,
             None,
         )
@@ -632,10 +719,12 @@ mod tests {
             &event("uid-1", "Jan Event", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0)),
             None,
             None,
+            None,
         )
         .unwrap();
         db.insert_event(
             &event("uid-2", "Feb Event", dt(2024, 2, 15, 9, 0), dt(2024, 2, 15, 10, 0)),
+            None,
             None,
             None,
         )
@@ -656,7 +745,7 @@ mod tests {
         e.description = Some("Long detailed description\nwith line breaks".to_string());
         e.location = Some("Main Auditorium".to_string());
         e.recurrence = Some("FREQ=YEARLY".to_string());
-        db.insert_event(&e, None, None).unwrap();
+        db.insert_event(&e, None, None, None).unwrap();
 
         let events = db.get_all_events(None, None).unwrap();
         assert_eq!(events[0].description.as_deref(), Some("Long detailed description\nwith line breaks"));
