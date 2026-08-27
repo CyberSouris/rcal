@@ -63,7 +63,39 @@ enum Commands {
     Sync,
 
     /// Create a new event
-    New,
+    New {
+        /// Event title (prompted if omitted)
+        #[arg(short, long)]
+        title: Option<String>,
+
+        /// Event date (YYYY-MM-DD), defaults to today
+        #[arg(short, long)]
+        date: Option<String>,
+
+        /// Start time (HH:MM 24h), defaults to 09:00
+        #[arg(long)]
+        time: Option<String>,
+
+        /// Duration in minutes, defaults to 60
+        #[arg(short = 'D', long)]
+        duration: Option<u32>,
+
+        /// All-day event
+        #[arg(short = 'a', long)]
+        all_day: bool,
+
+        /// Location
+        #[arg(short = 'l', long)]
+        location: Option<String>,
+
+        /// Description
+        #[arg(long)]
+        description: Option<String>,
+
+        /// Target calendar (name or URL), prompted if omitted
+        #[arg(short = 'c', long)]
+        calendar: Option<String>,
+    },
 
     /// Search events
     Search {
@@ -159,9 +191,26 @@ async fn main() -> anyhow::Result<()> {
                 summary.calendars.len(),
             );
         }
-        Commands::New => {
-            println!("Creating new event...");
-            // TODO: implement new event
+        Commands::New {
+            title,
+            date,
+            time,
+            duration,
+            all_day,
+            location,
+            description,
+            calendar,
+        } => {
+            handle_new(
+                title,
+                date,
+                time,
+                duration,
+                all_day,
+                location,
+                description,
+                calendar,
+            )?;
         }
         Commands::Search { query, from, to } => {
             let db = db::Database::open()?;
@@ -341,6 +390,248 @@ fn color_swatch(hex: Option<&str>) -> String {
         }
         _ => "  ".to_string(),
     }
+}
+
+/// Handle the `new` command: build an event from flags or interactive prompts
+#[allow(clippy::too_many_arguments)]
+fn handle_new(
+    title_flag: Option<String>,
+    date_flag: Option<String>,
+    time_flag: Option<String>,
+    duration_flag: Option<u32>,
+    all_day_flag: bool,
+    location_flag: Option<String>,
+    description_flag: Option<String>,
+    calendar_flag: Option<String>,
+) -> anyhow::Result<()> {
+    use std::io::IsTerminal;
+
+    let db = db::Database::open()?;
+    let calendars = db.get_calendars()?;
+    let interactive = std::io::stdin().is_terminal();
+
+    // --- Resolve target calendar ---
+    let calendar_id = match calendar_flag {
+        Some(sel) => {
+            let matched = calendars
+                .iter()
+                .find(|c| c.id == sel || c.name == sel)
+                .map(|c| c.id.clone());
+            match matched {
+                Some(id) => Some(id),
+                None => {
+                    println!("Available calendars:");
+                    for c in &calendars {
+                        println!("  - {} ({})", c.name, c.id);
+                    }
+                    anyhow::bail!(
+                        "Unknown calendar '{}'. Pass one of the names/URLs above with --calendar.",
+                        sel
+                    );
+                }
+            }
+        }
+        None => {
+            if calendars.is_empty() {
+                println!(
+                    "No calendars configured; event will be stored without a calendar.\n\
+                     Use 'rcal sync' to pull calendars from a CalDAV server."
+                );
+                None
+            } else if interactive {
+                println!("Select a calendar:");
+                for (i, c) in calendars.iter().enumerate() {
+                    println!("  {}. {} {}", i + 1, color_swatch(c.color.as_deref()), c.name);
+                }
+                let choice = prompt(
+                    &format!("Calendar [1-{}]", calendars.len()),
+                    Some(&calendars[0].name),
+                )?;
+                let selected = choice.unwrap_or_else(|| calendars[0].name.clone());
+                let idx = if let Ok(n) = selected.parse::<usize>() {
+                    n.checked_sub(1)
+                        .filter(|i| *i < calendars.len())
+                        .unwrap_or(0)
+                } else if let Some(pos) = calendars.iter().position(|c| c.name == selected) {
+                    pos
+                } else {
+                    println!("Unknown calendar '{}', using first.", selected);
+                    0
+                };
+                Some(calendars[idx].id.clone())
+            } else {
+                // Non-interactive: default to the first configured calendar
+                Some(calendars[0].id.clone())
+            }
+        }
+    };
+
+    // --- Get field values (flag, prompt, or default) ---
+    let title = match title_flag {
+        Some(t) if !t.trim().is_empty() => t,
+        Some(_) => anyhow::bail!("Title cannot be empty"),
+        None if interactive => prompt("Title", None)?
+            .ok_or_else(|| anyhow::anyhow!("Title is required"))?,
+        None => anyhow::bail!("Missing required --title"),
+    };
+
+    let date = match date_flag {
+        Some(d) => parse_date(&d)?,
+        None => {
+            let default = Local::now().format("%Y-%m-%d").to_string();
+            if interactive {
+                let input = prompt("Date", Some(&default))?.unwrap_or(default);
+                parse_date(&input)?
+            } else {
+                parse_date(&default)?
+            }
+        }
+    };
+
+    let all_day = if all_day_flag {
+        true
+    } else if time_flag.is_some() {
+        false
+    } else if interactive {
+        matches!(
+            prompt("All day? [y/N]", Some("n"))?
+                .unwrap_or_else(|| "n".to_string())
+                .to_lowercase()
+                .as_str(),
+            "y" | "yes"
+        )
+    } else {
+        false
+    };
+
+    let (dtstart, dtend) = if all_day {
+        let start = date.and_hms_opt(0, 0, 0).unwrap();
+        let end = start + chrono::Duration::days(1);
+        (
+            chrono::TimeZone::from_utc_datetime(&chrono::Utc, &start),
+            chrono::TimeZone::from_utc_datetime(&chrono::Utc, &end),
+        )
+    } else {
+        let time = match time_flag {
+            Some(t) => parse_time(&t)?,
+            None => {
+                let input = if interactive {
+                    prompt("Start time (HH:MM)", Some("09:00"))?
+                        .unwrap_or_else(|| "09:00".to_string())
+                } else {
+                    "09:00".to_string()
+                };
+                parse_time(&input)?
+            }
+        };
+
+        let duration = match duration_flag {
+            Some(d) => chrono::Duration::minutes(d as i64),
+            None => {
+                let input = if interactive {
+                    prompt("Duration (minutes)", Some("60"))?
+                        .unwrap_or_else(|| "60".to_string())
+                } else {
+                    "60".to_string()
+                };
+                let mins: i64 = input
+                    .trim()
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("Invalid duration: {}", input))?;
+                chrono::Duration::minutes(mins)
+            }
+        };
+
+        let start = date.and_time(time);
+        let end = start + duration;
+        (
+            chrono::TimeZone::from_utc_datetime(&chrono::Utc, &start),
+            chrono::TimeZone::from_utc_datetime(&chrono::Utc, &end),
+        )
+    };
+
+    let location = match location_flag {
+        Some(l) => Some(l),
+        None if interactive => prompt("Location", None)?,
+        None => None,
+    };
+
+    let description = match description_flag {
+        Some(d) => Some(d),
+        None if interactive => prompt("Description", None)?,
+        None => None,
+    };
+
+    let event = ical::CalendarEvent {
+        uid: uuid::Uuid::new_v4().to_string(),
+        summary: title,
+        description,
+        location,
+        dtstart: Some(dtstart),
+        dtend: Some(dtend),
+        all_day,
+        status: Some("CONFIRMED".to_string()),
+        recurrence: None,
+    };
+
+    println!();
+    println!(
+        "{} {} ({})",
+        color_swatch(calendar_id.as_deref().and_then(|id| {
+            calendars.iter().find(|c| c.id == *id).and_then(|c| c.color.as_deref())
+        })),
+        event.summary,
+        format_event_time(&event)
+    );
+
+    if interactive {
+        let confirm = prompt("Add event? [y/N]", Some("n"))?
+            .unwrap_or_else(|| "n".to_string())
+            .to_lowercase();
+        if !matches!(confirm.as_str(), "y" | "yes") {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    db.insert_event(&event, calendar_id.as_deref(), None, None)?;
+    println!("Event added.");
+    Ok(())
+}
+
+/// Read one line from stdin. Returns `None` when the user entered nothing.
+fn prompt(label: &str, default: Option<&str>) -> anyhow::Result<Option<String>> {
+    let prompt_text = match default {
+        Some(d) => format!("{} [{}]: ", label, d),
+        None => format!("{}: ", label),
+    };
+    print!("{}", prompt_text);
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let trimmed = input.trim().to_string();
+    if trimmed.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(trimmed))
+    }
+}
+
+/// Parse a time string in HH:MM 24-hour format
+fn parse_time(s: &str) -> anyhow::Result<chrono::NaiveTime> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 2 {
+        anyhow::bail!("Invalid time format: {} (expected HH:MM)", s);
+    }
+    let hours: u32 = parts[0]
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid hour in: {} (expected HH:MM)", s))?;
+    let minutes: u32 = parts[1]
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid minute in: {} (expected HH:MM)", s))?;
+    chrono::NaiveTime::from_hms_opt(hours, minutes, 0)
+        .ok_or_else(|| anyhow::anyhow!("Invalid time: {} (expected HH:MM, 00-23:00-59)", s))
 }
 
 /// Format event time for import preview
