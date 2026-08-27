@@ -175,18 +175,24 @@ async fn main() -> anyhow::Result<()> {
             let mut total = 0usize;
             for result in &summary.calendars {
                 println!(
-                    "  {}: +{} added, ~{} updated, {} unchanged, -{} deleted",
-                    result.name, result.added, result.updated, result.unchanged, result.deleted
+                    "  {}: +{} added, ~{} updated, {} unchanged, -{} deleted, ↑{} pushed",
+                    result.name,
+                    result.added,
+                    result.updated,
+                    result.unchanged,
+                    result.deleted,
+                    result.pushed
                 );
                 total += result.added + result.updated + result.unchanged + result.deleted;
             }
             println!();
             println!(
-                "Sync complete: +{} added, ~{} updated, {} unchanged, -{} deleted ({} events in {} calendars)",
+                "Sync complete: +{} added, ~{} updated, {} unchanged, -{} deleted, ↑{} pushed ({} events in {} calendars)",
                 summary.total_added,
                 summary.total_updated,
                 summary.total_unchanged,
                 summary.total_deleted,
+                summary.total_pushed,
                 total,
                 summary.calendars.len(),
             );

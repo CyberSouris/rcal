@@ -164,6 +164,88 @@ pub fn parse_ical_datetime(value: &str) -> Result<DateTime<Utc>> {
     }
 }
 
+/// Serialize an event back into iCal (RFC 5545) format.
+///
+/// The output is a complete VCALENDAR with a single VEVENT, suitable
+/// for PUT-ing to a CalDAV server or exporting to a file.
+pub fn export_ical(event: &CalendarEvent) -> String {
+    let mut out = String::new();
+
+    out.push_str("BEGIN:VCALENDAR\r\n");
+    out.push_str("VERSION:2.0\r\n");
+    out.push_str("PRODID:-//rcal//EN\r\n");
+    out.push_str("CALSCALE:GREGORIAN\r\n");
+    out.push_str("BEGIN:VEVENT\r\n");
+
+    // Required properties
+    out.push_str(&fold_line(&format!("UID:{}", event.uid)));
+    out.push_str("\r\n");
+    out.push_str(&format!("DTSTAMP:{}\r\n", Utc::now().format("%Y%m%dT%H%M%SZ")));
+
+    // Date/time properties
+    if event.all_day {
+        if let Some(start) = event.dtstart {
+            out.push_str(&format!("DTSTART;VALUE=DATE:{}\r\n", start.format("%Y%m%d")));
+        }
+        if let Some(end) = event.dtend {
+            out.push_str(&format!("DTEND;VALUE=DATE:{}\r\n", end.format("%Y%m%d")));
+        }
+    } else {
+        if let Some(start) = event.dtstart {
+            out.push_str(&format!("DTSTART:{}\r\n", start.format("%Y%m%dT%H%M%SZ")));
+        }
+        if let Some(end) = event.dtend {
+            out.push_str(&format!("DTEND:{}\r\n", end.format("%Y%m%dT%H%M%SZ")));
+        }
+    }
+
+    // Optional text properties
+    for (name, value) in [
+        ("SUMMARY", event.summary.as_str()),
+        ("DESCRIPTION", event.description.as_deref().unwrap_or("")),
+        ("LOCATION", event.location.as_deref().unwrap_or("")),
+        ("STATUS", event.status.as_deref().unwrap_or("")),
+    ] {
+        if !value.is_empty() {
+            out.push_str(&fold_line(&format!("{}:{}", name, value)));
+            out.push_str("\r\n");
+        }
+    }
+
+    if let Some(rrule) = &event.recurrence {
+        out.push_str(&fold_line(&format!("RRULE:{}", rrule)));
+        out.push_str("\r\n");
+    }
+
+    out.push_str("END:VEVENT\r\n");
+    out.push_str("END:VCALENDAR\r\n");
+    out
+}
+
+/// Fold a content line to RFC 5545's 75-octet limit using CRLF + space.
+fn fold_line(line: &str) -> String {
+    let mut result = String::new();
+    let mut remaining = line;
+    let mut first = true;
+    while !remaining.is_empty() {
+        let take = remaining
+            .char_indices()
+            .nth(75)
+            .map(|(i, _)| i)
+            .unwrap_or(remaining.len());
+        let chunk = &remaining[..take];
+        if first {
+            result.push_str(chunk);
+            first = false;
+        } else {
+            result.push_str("\r\n ");
+            result.push_str(chunk);
+        }
+        remaining = &remaining[take..];
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +260,51 @@ mod tests {
     fn test_parse_ical_date() {
         let result = parse_ical_datetime("20240115");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_export_and_reparse_roundtrip() {
+        let dtstart = parse_ical_datetime("20240506T090000Z").unwrap();
+        let dtend = parse_ical_datetime("20240506T100000Z").unwrap();
+        let event = CalendarEvent {
+            uid: "evt-roundtrip@example.com".to_string(),
+            summary: "Design Review".to_string(),
+            description: Some("A long description that goes well beyond seventy-five characters in total length to exercise the line folding logic".to_string()),
+            location: Some("Room 42".to_string()),
+            dtstart: Some(dtstart),
+            dtend: Some(dtend),
+            all_day: false,
+            status: Some("CONFIRMED".to_string()),
+            recurrence: Some("FREQ=WEEKLY;COUNT=4".to_string()),
+        };
+
+        let ical = export_ical(&event);
+        let reparsed = parse_ical_text(&ical).unwrap();
+        assert_eq!(reparsed.events.len(), 1);
+        let back = &reparsed.events[0];
+        assert_eq!(back.uid, "evt-roundtrip@example.com");
+        assert_eq!(back.summary, "Design Review");
+        assert_eq!(back.description, event.description);
+        assert_eq!(back.location.as_deref(), Some("Room 42"));
+        assert_eq!(back.status.as_deref(), Some("CONFIRMED"));
+        assert_eq!(back.recurrence.as_deref(), Some("FREQ=WEEKLY;COUNT=4"));
+        assert_eq!(back.dtstart.unwrap(), dtstart);
+        assert_eq!(back.dtend.unwrap(), dtend);
+    }
+
+    #[test]
+    fn test_fold_line_splits_long_lines() {
+        let long = "a".repeat(200);
+        let folded = fold_line(&long);
+        // CRLF + space separators: each continuation adds 3 bytes
+        let segments = folded.split("\r\n ").count();
+        assert!(segments >= 3);
+        // Each unfolded segment is at most 75 chars
+        for seg in folded.split("\r\n ") {
+            assert!(seg.len() <= 75);
+        }
+        // Round-trips back to the original (ignoring CRLF+space)
+        let unfolded: String = folded.replace("\r\n ", "");
+        assert_eq!(unfolded, long);
     }
 }

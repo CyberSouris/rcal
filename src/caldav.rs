@@ -69,6 +69,7 @@ pub struct CalendarSyncResult {
     pub updated: usize,
     pub unchanged: usize,
     pub deleted: usize,
+    pub pushed: usize,
 }
 
 /// Aggregate result of a sync run
@@ -79,6 +80,7 @@ pub struct SyncSummary {
     pub total_updated: usize,
     pub total_unchanged: usize,
     pub total_deleted: usize,
+    pub total_pushed: usize,
 }
 
 /// Resolve the server password using, in order:
@@ -322,10 +324,50 @@ impl CalDavClient {
             summary.total_updated += result.updated;
             summary.total_unchanged += result.unchanged;
             summary.total_deleted += result.deleted;
+            summary.total_pushed += result.pushed;
             summary.calendars.push(result);
         }
 
         Ok(summary)
+    }
+
+    /// Create or update an event on the server with a PUT request.
+    ///
+    /// `href` is the resource name within the calendar collection (e.g.
+    /// `my-event.ics`). Returns the server's new ETag on success.
+    pub async fn put_event(
+        &self,
+        calendar: &RemoteCalendar,
+        href: &str,
+        ical_data: &str,
+    ) -> Result<Option<String>> {
+        let base = absolute_url(&self.base_url, &calendar.href)
+            .trim_end_matches('/')
+            .to_string();
+        let url = format!("{}/{}", base, urlencode_path_segment(href));
+
+        let resp = self
+            .http
+            .put(&url)
+            .basic_auth(&self.username, Some(&self.password))
+            .header("Content-Type", "text/calendar; charset=utf-8")
+            .header("If-None-Match", "*")
+            .body(ical_data.to_string())
+            .send()
+            .await
+            .with_context(|| format!("PUT request failed: {}", url))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            bail!("PUT {} returned status {}: {}", url, status, truncate(&text, 300));
+        }
+
+        Ok(resp
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string()))
     }
 
     async fn sync_calendar(
@@ -339,6 +381,7 @@ impl CalDavClient {
             updated: 0,
             unchanged: 0,
             deleted: 0,
+            pushed: 0,
         };
 
         // Ensure calendar row exists locally
@@ -393,8 +436,50 @@ impl CalDavClient {
             }
         }
 
+        // Push locally-created events (no etag yet) that don't exist on the server.
+        let current = db.get_events_for_calendar(&cal.href)?;
+        for stored in &current {
+            let uid = &stored.event.uid;
+            if stored.etag.is_none() && !remote_uids.contains(uid) {
+                let ical_data = crate::ical::export_ical(&stored.event);
+                let href = href_for_uid(uid);
+                let new_etag = self
+                    .put_event(cal, &href, &ical_data)
+                    .await
+                    .with_context(|| format!("Failed to push event {}", uid))?;
+                db.set_sync_metadata(uid, &cal.href, new_etag.as_deref(), Some(&ical_data))?;
+                result.pushed += 1;
+            }
+        }
+
         Ok(result)
     }
+}
+
+/// Build a safe resource name for an event UID.
+fn href_for_uid(uid: &str) -> String {
+    let sanitized: String = uid
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' => c,
+            _ => '_',
+        })
+        .collect();
+    format!("{}.ics", sanitized)
+}
+
+/// Percent-encode a path segment for use in a URL.
+fn urlencode_path_segment(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
 }
 
 // --- XML helpers ---
@@ -685,6 +770,7 @@ END:VCALENDAR</c:calendar-data>
                 updated: 0,
                 unchanged: 0,
                 deleted: 0,
+                pushed: 0,
             };
 
             let mut remote_uids: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -787,5 +873,152 @@ END:VCALENDAR</c:calendar-data>
             assert_eq!(r.deleted, 1, "evt-2 was removed on the server");
             assert_eq!(db.get_events_for_calendar(&cal.href).unwrap().len(), 2);
         });
+    }
+
+    #[test]
+    fn test_href_for_uid_and_urlencode() {
+        assert_eq!(href_for_uid("local-1"), "local-1.ics");
+        assert_eq!(href_for_uid("a b@c"), "a_b_c.ics");
+        assert_eq!(urlencode_path_segment("a b/&"), "a%20b%2F%26");
+    }
+
+    #[tokio::test]
+    async fn test_sync_pushes_local_events_against_mock_server() {
+        use crate::ical::CalendarEvent;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        const BASE_XML: &str = r#"<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+  <d:response>
+    <d:href>/p/</d:href>
+    <d:propstat>
+      <d:prop><d:current-user-principal><d:href>/p/</d:href></d:current-user-principal></d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+</d:multistatus>"#;
+
+        const PRINCIPAL_XML: &str = r#"<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:response>
+    <d:href>/p/</d:href>
+    <d:propstat>
+      <d:prop><c:calendar-home-set><d:href>/p/</d:href></c:calendar-home-set></d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+</d:multistatus>"#;
+
+        const HOME_XML: &str = r#"<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:response>
+    <d:href>/p/work/</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:resourcetype><d:collection/><c:calendar/></d:resourcetype>
+        <d:displayname>Work</d:displayname>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+</d:multistatus>"#;
+
+        const EMPTY_XML: &str = r#"<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:"></d:multistatus>"#;
+
+        let server = MockServer::start().await;
+        let base = server.uri();
+        let work = format!("{}/p/work/", base);
+
+        Mock::given(method("PROPFIND"))
+            .and(path("/"))
+            .and(header("Depth", "0"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(BASE_XML))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("PROPFIND"))
+            .and(path("/p/"))
+            .and(header("Depth", "0"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(PRINCIPAL_XML))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("PROPFIND"))
+            .and(path("/p/"))
+            .and(header("Depth", "1"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(HOME_XML))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("REPORT"))
+            .and(path("/p/work/"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(EMPTY_XML))
+            .mount(&server)
+            .await;
+
+        let put_tmpl = ResponseTemplate::new(201).insert_header("ETag", "\"new-etag\"");
+        Mock::given(method("PUT"))
+            .and(path("/p/work/local-1.ics"))
+            .respond_with(put_tmpl)
+            .mount(&server)
+            .await;
+
+        let client = CalDavClient::from_parts(&base, "alice", "pw").unwrap();
+        let db = Database::open_from(std::path::Path::new(":memory:")).unwrap();
+
+        let local_evt = CalendarEvent {
+            uid: "local-1".to_string(),
+            summary: "Local only".to_string(),
+            description: None,
+            location: None,
+            dtstart: Some(crate::ical::parse_ical_datetime("20240201T090000Z").unwrap()),
+            dtend: Some(crate::ical::parse_ical_datetime("20240201T100000Z").unwrap()),
+            all_day: false,
+            status: None,
+            recurrence: None,
+        };
+        db.insert_calendar(&work, "Work", None, None).unwrap();
+        db.insert_event(&local_evt, Some(&work), None, None).unwrap();
+
+        let calendars = client.discover_calendars().await.unwrap();
+        assert_eq!(calendars.len(), 1);
+        assert_eq!(calendars[0].href, work);
+
+        let summary = client.sync(&db, &calendars).await.unwrap();
+        assert_eq!(summary.total_pushed, 1);
+        let stored = db.get_events_for_calendar(&work).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].etag.as_deref(), Some("\"new-etag\""));
+
+        // Since the mock server keeps reporting an empty calendar, a second
+        // sync sees the pushed (now-etagged) event as removed remotely.
+        let summary = client.sync(&db, &calendars).await.unwrap();
+        assert_eq!(summary.total_pushed, 0, "etag recorded, no re-push");
+        assert_eq!(summary.total_deleted, 1, "event gone from mock server");
+        assert!(db.get_events_for_calendar(&work).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_calendar_discovery_parsing() {
+        let xml = r#"<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:response>
+    <d:href>/p/work/</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:resourcetype><d:collection/><c:calendar/></d:resourcetype>
+        <d:displayname>Work</d:displayname>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+</d:multistatus>"#;
+        let doc = Document::parse(xml).unwrap();
+        let cals = calendar_collections_from(&doc, "https://example.com/dav/").unwrap();
+        assert_eq!(cals.len(), 1);
+        assert_eq!(cals[0].name, "Work");
+        assert_eq!(cals[0].href, "https://example.com/p/work/");
     }
 }
