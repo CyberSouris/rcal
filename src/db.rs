@@ -10,9 +10,7 @@ use crate::ical::CalendarEvent;
 #[derive(Debug)]
 pub struct StoredEvent {
     pub event: CalendarEvent,
-    pub calendar_id: Option<String>,
     pub etag: Option<String>,
-    pub ical_data: Option<String>,
 }
 
 pub struct Database {
@@ -53,7 +51,6 @@ impl Database {
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
                     color TEXT,
-                    display_name TEXT,
                     ctag TEXT,
                     sync_token TEXT
                 );
@@ -91,17 +88,11 @@ impl Database {
     // --- Calendar operations ---
 
     /// Insert a calendar
-    pub fn insert_calendar(
-        &self,
-        id: &str,
-        name: &str,
-        color: Option<&str>,
-        display_name: Option<&str>,
-    ) -> Result<()> {
+    pub fn insert_calendar(&self, id: &str, name: &str, color: Option<&str>) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO calendars (id, name, color, display_name)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![id, name, color, display_name],
+            "INSERT OR REPLACE INTO calendars (id, name, color)
+             VALUES (?1, ?2, ?3)",
+            params![id, name, color],
         )?;
         Ok(())
     }
@@ -111,7 +102,7 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT c.id, c.name, c.color, c.display_name,
+                "SELECT c.id, c.name, c.color,
                         COUNT(e.id) as event_count
                  FROM calendars c
                  LEFT JOIN events e ON e.calendar_id = c.id
@@ -124,8 +115,7 @@ impl Database {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 color: row.get(2)?,
-                display_name: row.get(3)?,
-                event_count: row.get::<_, i64>(4)? as usize,
+                event_count: row.get::<_, i64>(3)? as usize,
             })
         })?;
 
@@ -348,7 +338,7 @@ impl Database {
     pub fn get_events_for_calendar(&self, calendar_id: &str) -> Result<Vec<StoredEvent>> {
         let sql = "SELECT uid, summary, description, location,
                           dtstart, dtend, all_day, status, recurrence,
-                          calendar_id, etag, ical_data
+                          etag
                    FROM events
                    WHERE calendar_id = ?1
                      AND dtstart IS NOT NULL
@@ -357,27 +347,16 @@ impl Database {
         let mut stmt = self.conn.prepare(sql)?;
 
         let rows = stmt.query_map(params![calendar_id], |row| {
-            let calendar_id: Option<String> = row.get(9)?;
-            let etag: Option<String> = row.get(10)?;
-            let ical_data: Option<String> = row.get(11)?;
+            let etag: Option<String> = row.get(9)?;
 
             Ok(StoredEvent {
                 event: event_stub_from_row(row),
-                calendar_id,
                 etag,
-                ical_data,
             })
         })?;
 
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("Failed to fetch calendar events")
-    }
-
-    /// Get the etag stored for an event, if any
-    pub fn get_event_etag(&self, uid: &str) -> Result<Option<String>> {
-        let mut stmt = self.conn.prepare("SELECT etag FROM events WHERE uid = ?1")?;
-        let etag: Option<String> = stmt.query_row(params![uid], |row| row.get(0)).ok();
-        Ok(etag)
     }
 
     /// Set sync metadata (calendar_id, etag, ical_data) for an existing event
@@ -430,7 +409,6 @@ pub struct Calendar {
     pub id: String,
     pub name: String,
     pub color: Option<String>,
-    pub display_name: Option<String>,
     pub event_count: usize,
 }
 
@@ -684,9 +662,8 @@ mod tests {
     #[test]
     fn test_insert_calendar_and_get_all() {
         let db = test_db();
-        db.insert_calendar("cal-1", "Personal", Some("#ff0000"), Some("My Personal"))
-            .unwrap();
-        db.insert_calendar("cal-2", "Work", Some("#00ff00"), None).unwrap();
+        db.insert_calendar("cal-1", "Personal", Some("#ff0000")).unwrap();
+        db.insert_calendar("cal-2", "Work", Some("#00ff00")).unwrap();
 
         let calendars = db.get_calendars().unwrap();
         assert_eq!(calendars.len(), 2);
@@ -696,16 +673,14 @@ mod tests {
         assert_eq!(calendars[1].name, "Work");
 
         assert_eq!(calendars[0].color.as_deref(), Some("#ff0000"));
-        assert_eq!(calendars[0].display_name.as_deref(), Some("My Personal"));
         assert_eq!(calendars[1].color.as_deref(), Some("#00ff00"));
-        assert_eq!(calendars[1].display_name, None);
     }
 
     #[test]
     fn test_insert_calendar_replaces_existing() {
         let db = test_db();
-        db.insert_calendar("cal-1", "Personal", None, None).unwrap();
-        db.insert_calendar("cal-1", "Personal Updated", None, None).unwrap();
+        db.insert_calendar("cal-1", "Personal", None).unwrap();
+        db.insert_calendar("cal-1", "Personal Updated", None).unwrap();
 
         let calendars = db.get_calendars().unwrap();
         assert_eq!(calendars.len(), 1);

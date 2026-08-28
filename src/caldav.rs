@@ -55,7 +55,6 @@ pub struct RemoteCalendar {
 /// An event fetched from the server
 #[derive(Debug, Clone)]
 pub struct RemoteEvent {
-    pub href: String,
     pub etag: Option<String>,
     pub event: crate::ical::CalendarEvent,
     pub ical_data: String,
@@ -145,6 +144,7 @@ impl CalDavClient {
     }
 
     /// Convenience for tests with an explicit password
+    #[cfg(test)]
     pub fn from_parts(base_url: &str, username: &str, password: &str) -> Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent(concat!("rcal/", env!("CARGO_PKG_VERSION")))
@@ -299,7 +299,6 @@ impl CalDavClient {
 
             for event in parsed.events {
                 events.push(RemoteEvent {
-                    href: href.clone(),
                     etag: etag.clone(),
                     event,
                     ical_data: data.clone(),
@@ -385,7 +384,7 @@ impl CalDavClient {
         };
 
         // Ensure calendar row exists locally
-        db.insert_calendar(&cal.href, &cal.name, cal.color.as_deref(), None)?;
+        db.insert_calendar(&cal.href, &cal.name, cal.color.as_deref())?;
 
         let remote_events = self.fetch_events(cal).await?;
         let mut remote_uids: HashSet<String> = HashSet::new();
@@ -762,7 +761,7 @@ END:VCALENDAR</c:calendar-data>
             cal: &RemoteCalendar,
             remote: Vec<RemoteEvent>,
         ) -> CalendarSyncResult {
-            db.insert_calendar(&cal.href, &cal.name, None, None).unwrap();
+            db.insert_calendar(&cal.href, &cal.name, None).unwrap();
 
             let mut result = CalendarSyncResult {
                 name: cal.name.clone(),
@@ -855,9 +854,9 @@ END:VCALENDAR</c:calendar-data>
 
             // Initial sync: all three events new on the server
             let initial = vec![
-                RemoteEvent { href: "e1.ics".into(), etag: Some("\"1\"".into()), event: evt1.clone(), ical_data: "x".into() },
-                RemoteEvent { href: "e2.ics".into(), etag: Some("\"2\"".into()), event: evt2.clone(), ical_data: "x".into() },
-                RemoteEvent { href: "e3.ics".into(), etag: Some("\"3\"".into()), event: evt3.clone(), ical_data: "x".into() },
+                RemoteEvent { etag: Some("\"1\"".into()), event: evt1.clone(), ical_data: "x".into() },
+                RemoteEvent { etag: Some("\"2\"".into()), event: evt2.clone(), ical_data: "x".into() },
+                RemoteEvent { etag: Some("\"3\"".into()), event: evt3.clone(), ical_data: "x".into() },
             ];
             let r = run_sync(&db, &cal, initial).await;
             assert_eq!(r.added, 3);
@@ -865,8 +864,8 @@ END:VCALENDAR</c:calendar-data>
 
             // Second sync: server changed etag2, dropped evt2, added nothing else.
             let second = vec![
-                RemoteEvent { href: "e1.ics".into(), etag: Some("\"1\"".into()), event: evt1.clone(), ical_data: "x".into() },
-                RemoteEvent { href: "e3.ics".into(), etag: Some("\"3-new\"".into()), event: evt3.clone(), ical_data: "x".into() },
+                RemoteEvent { etag: Some("\"1\"".into()), event: evt1.clone(), ical_data: "x".into() },
+                RemoteEvent { etag: Some("\"3-new\"".into()), event: evt3.clone(), ical_data: "x".into() },
             ];
             let r = run_sync(&db, &cal, second).await;
             assert_eq!(r.unchanged, 1);
@@ -979,7 +978,7 @@ END:VCALENDAR</c:calendar-data>
             status: None,
             recurrence: None,
         };
-        db.insert_calendar(&work, "Work", None, None).unwrap();
+        db.insert_calendar(&work, "Work", None).unwrap();
         db.insert_event(&local_evt, Some(&work), None, None).unwrap();
 
         let calendars = client.discover_calendars().await.unwrap();
