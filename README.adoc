@@ -1,0 +1,161 @@
+= rcal
+
+A CLI calendar tool with CalDAV synchronization, written in Rust.
+
+`rcal` keeps an offline SQLite cache of your events, renders day, week and
+month views in the terminal, imports iCal (`.ics`) files, and synchronizes
+bidirectionally with any CalDAV server.
+
+== Features
+
+* Day, week and month terminal views with color-coded calendars
+* `rcal new` to create events interactively or via command-line flags
+* iCal file import with an interactive preview, conflict detection and dry-run
+* Case-insensitive text search across summary, description and location
+* Bidirectional CalDAV synchronization (pull changes, push new events),
+  using ETag change detection
+* Offline SQLite cache at a predictable location
+* Passwords are never stored; they come from a command, an environment
+  variable, or an interactive prompt
+
+== Installation
+
+=== Prerequisites
+
+* Rust 1.85 or newer (edition 2024) — https://rustup.rs
+* No other runtime dependencies; the SQLite driver is bundled
+
+=== Building from source
+
+[source,sh]
+----
+git clone <repository-url> rcal
+cd rcal
+cargo build --release
+----
+
+Install the binary (adjust the destination to taste):
+
+[source,sh]
+----
+install -Dm755 target/release/rcal "$HOME/.local/bin/rcal"
+----
+
+Ensure the destination is on your `PATH`. Verify the install:
+
+[source,sh]
+----
+rcal --version
+rcal --help
+----
+
+=== Updating
+
+[source,sh]
+----
+git pull
+cargo build --release
+install -Dm755 target/release/rcal "$HOME/.local/bin/rcal"
+----
+
+== Quick start
+
+=== Configuration
+
+CalDAV synchronization needs a config file. Create it at
+`~/.config/rcal/config.toml` (or `$XDG_CONFIG_HOME/rcal/config.toml`):
+
+[source,toml]
+----
+[server]
+url = "https://dav.example.com/"
+username = "alice"
+password_command = "pass show caldav/alice"
+
+[display]
+default_view = "today"
+time_format = "24h"
+color_scheme = "auto"
+
+[calendars]
+show = []
+hide = []
+
+[notifications]
+enabled = true
+reminder_minutes = [15, 5]
+----
+
+Only the `[server]` table is required. The password is resolved in this
+order:
+
+1. `password_command` — a shell command whose stdout is the password
+2. the `RCAL_PASSWORD` environment variable
+3. an interactive prompt
+
+=== First sync
+
+[source,sh]
+----
+rcal sync                        # pull remote events into the offline cache
+rcal today                       # see what is coming up
+rcal calendars                   # list discovered calendars and colors
+----
+
+=== Creating events
+
+[source,sh]
+----
+rcal new \                       # interactive
+rcal new --title "Standup" --date 2026-03-02 --time 09:00 --calendar Work
+rcal new -t "Holiday" -a -l "Home"        # all-day event
+----
+
+Newly created events are stored locally and uploaded to the CalDAV server the
+next time you run `rcal sync`.
+
+== Usage reference
+
+`rcal today`:: Show today's events
+`rcal week [-D DATE]`:: Week overview (`YYYY-MM-DD`)
+`rcal month [-M MONTH]`:: Month overview (`YYYY-MM`)
+`rcal show DATE`:: Events for a specific date
+`rcal import FILE [--add] [--dry-run]`:: Import an `.ics` file
+`rcal sync`:: Synchronize with the CalDAV server
+`rcal new [-t TITLE] [-d DATE] [--time HH:MM] [-D MIN] [-a] [-l LOC] [--description DESC] [-c CAL]`:: Create an event
+`rcal search QUERY [--from DATE] [--to DATE]`:: Search events
+`rcal calendars`:: List calendars
+
+See `rcal --help` and the man page (`man ./man/rcal.1`) for full details.
+
+== Data locations
+
+[cols="1,3",options="header"]
+|===
+| Path
+| Purpose
+
+| `~/.config/rcal/config.toml`
+| Configuration (`$XDG_CONFIG_HOME/rcal/config.toml`)
+
+| `~/.local/share/rcal/rcal.db`
+| Offline event cache and sync metadata (`$XDG_DATA_HOME/rcal/rcal.db`)
+|===
+
+Passwords are never written to disk by `rcal`.
+
+== Development
+
+[source,sh]
+----
+cargo build                 # debug build
+cargo test                  # unit and integration-style tests
+cargo build --release       # optimized build (LTO enabled)
+----
+
+The specification that drives the project is in *spec.md*. Test fixtures
+`test.ics` and `conflicts.ics` are used by manual workflows.
+
+== License
+
+GPL-3.0 — see the `license` field in `Cargo.toml`.

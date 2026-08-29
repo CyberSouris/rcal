@@ -1,0 +1,194 @@
+.TH RCAL 1 "September 2026" "rcal 0.1.0" "User Commands"
+.SH NAME
+rcal \- CLI calendar tool with CalDAV synchronization
+.SH SYNOPSIS
+.B rcal
+.RI [ COMMAND ] [ OPTIONS ]
+.SH DESCRIPTION
+.B rcal
+is a command-line calendar tool. It keeps an offline SQLite cache of your
+events, displays day, week and month views, imports iCal (.ics) files, and
+synchronizes bidirectionally with a CalDAV server (for example Radicale,
+DAViCal, or Nextcloud Calendar).
+.SH GLOBAL OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Print help information.
+.TP
+.BR \-V ", " \-\-version
+Print version information.
+.SH COMMANDS
+.TP
+.B today
+Show today's events.
+.TP
+.B week
+Show an overview of the week containing the given date, or the current week.
+.TP
+.RS
+.IP "\fB\-d, \-\-date\fR \fIDATE\fR"
+Start date (\fIYYYY\-MM\-DD\fR); defaults to the current week.
+.RE
+.TP
+.B month
+Show an overview of the given month, or the current month.
+.TP
+.RS
+.IP "\fB\-m, \-\-month\fR \fIMONTH\fR"
+Month (\fIYYYY\-MM\fR); defaults to the current month.
+.RE
+.TP
+.B show
+Show events for a specific date.
+.TP
+.RS
+.IP "\fBDATE\fR"
+Date to show (\fIYYYY\-MM\-DD\fR).
+.RE
+.TP
+.B import
+Import an iCal (.ics) file. Interactively previews each event before adding;
+a report is shown after the import.
+.TP
+.RS
+.IP "\fBFILE\fR"
+Path to the .ics file.
+.IP "\fB\-\-add\fR"
+Add all events without interactive prompts.
+.IP "\fB\-\-dry-run\fR"
+Preview only; do not modify the database.
+.RE
+.TP
+.B sync
+Synchronize with the CalDAV server configured in the config file. Discovers
+calendars, pulls changes (adds, updates, deletions), and pushes locally
+created events with an HTTP PUT. Prints per-calendar and total counts of
+added, updated, unchanged, deleted and pushed events.
+.TP
+.B new
+Create a new event. When run interactively (a TTY), missing values are
+prompted for. When run non-interactively, \fB\-\-title\fR is required and
+defaults are used for everything else.
+.TP
+.RS
+.IP "\fB\-t, \-\-title\fR \fITITLE\fR"
+Event title.
+.IP "\fB\-d, \-\-date\fR \fIDATE\fR"
+Event date (\fIYYYY\-MM\-DD\fR); defaults to today.
+.IP "\fB\-\-time\fR \fITIME\fR"
+Start time (24h \fIHH:MM\fR); defaults to 09:00.
+.IP "\fB\-D, \-\-duration\fR \fIMINUTES\fR"
+Duration in minutes; defaults to 60.
+.IP "\fB\-a, \-\-all-day\fR"
+Create an all-day event.
+.IP "\fB\-l, \-\-location\fR \fILOCATION\fR"
+Event location.
+.IP "\fB\-\-description\fR \fIDESCRIPTION\fR"
+Event description.
+.IP "\fB\-c, \-\-calendar\fR \fICALENDAR\fR"
+Target calendar (name or URL as shown by the \fBcalendars\fR command).
+.RE
+.TP
+.B search
+Search events by text. Matches the summary, description and location
+(case-insensitive).
+.TP
+.RS
+.IP "\fBQUERY\fR"
+Search query.
+.IP "\fB\-\-from\fR \fIDATE\fR"
+Lower bound of the date range (\fIYYYY\-MM\-DD\fR).
+.IP "\fB\-\-to\fR \fIDATE\fR"
+Upper bound of the date range (\fIYYYY\-MM\-DD\fR).
+.RE
+.TP
+.B calendars
+List available calendars with their color swatches and event counts.
+.SH CONFIGURATION
+.B rcal
+reads a TOML configuration file. By default it looks in
+.IR $XDG_CONFIG_HOME/rcal/config.toml
+or (when that variable is unset)
+.IR ~/.config/rcal/config.toml .
+A config file is required for \fBsync\fR; create it manually if it does not
+exist.
+.PP
+.nf
+[server]
+url = "https://dav.example.com/"
+username = "alice"
+password_command = "pass show caldav/alice"
+
+[display]
+default_view = "today"
+time_format = "24h"
+color_scheme = "auto"
+
+[calendars]
+show = []
+hide = []
+
+[notifications]
+enabled = true
+reminder_minutes = [15, 5]
+.fi
+.PP
+The \fBdisplay\fR, \fBcalendars\fR and \fBnotifications\fR tables are
+optional and their values fall back to the defaults shown above.
+.SH ENVIRONMENT
+.TP
+.B RCAL_PASSWORD
+Password used for CalDAV authentication, used when
+.B password_command
+is not configured. The password is resolved in this order: the
+.I password_command
+from the config file, then the \fBRCAL_PASSWORD\fR environment variable, then
+an interactive prompt. Passwords are never stored in the database.
+.TP
+.B XDG_CONFIG_HOME
+Overrides the base directory for the config file.
+.TP
+.B XDG_DATA_HOME
+Overrides the base directory for the database.
+.SH FILES
+.TP
+.I ~/.config/rcal/config.toml
+Configuration file (see CONFIGURATION).
+.TP
+.I ~/.local/share/rcal/rcal.db
+SQLite database holding the offline event cache and sync metadata
+(etags, calendar associations).
+.SH EXAMPLES
+.PP
+Show today's events:
+.nf
+$ rcal today
+.fi
+.PP
+Show the events of March 1, 2026:
+.nf
+$ rcal show 2026-03-01
+.fi
+.PP
+Preview an iCal file without importing and then import everything:
+.nf
+$ rcal import schedule.ics --dry-run
+$ rcal import schedule.ics --add
+.fi
+.PP
+Create a one-hour meeting on a specific calendar:
+.nf
+$ rcal new --title "Design review" --date 2026-03-02 --time 14:00 \\
+           --location "Room 3" --calendar "http://dav.example.com/alice/work/"
+.fi
+.PP
+Synchronize with the CalDAV server:
+.nf
+$ rcal sync
+.fi
+.SH EXIT STATUS
+Exit status is \fB0\fR on success and \fB1\fR on error.
+.SH SEE ALSO
+.BR radicale (5),
+.br
+RFC 5545 (Internet Calendaring and Scheduling Core Object Specification)
