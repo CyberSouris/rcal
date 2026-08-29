@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -89,6 +89,42 @@ fn default_reminder_minutes() -> Vec<u32> {
 }
 
 impl Config {
+    /// Build a config from CalDAV server credentials
+    pub fn new(
+        url: impl Into<String>,
+        username: impl Into<String>,
+        password_command: Option<String>,
+    ) -> Self {
+        Self {
+            server: ServerConfig {
+                url: url.into(),
+                username: username.into(),
+                password_command,
+            },
+            display: DisplayConfig::default(),
+            calendars: CalendarsConfig::default(),
+            notifications: NotificationsConfig::default(),
+        }
+    }
+
+    /// Serialize to TOML and write to the given path, creating parent
+    /// directories as needed
+    pub fn write_to(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Failed to create config directory: {}",
+                    parent.display()
+                )
+            })?;
+        }
+        let content =
+            toml::to_string(self).context("Failed to serialize config file")?;
+        fs::write(path, content)
+            .with_context(|| format!("Failed to write config file: {}", path.display()))?;
+        Ok(())
+    }
+
     /// Load configuration from default location
     pub fn load() -> Result<Self> {
         let config_path = Self::config_path()?;
@@ -131,5 +167,49 @@ impl Config {
     /// Get the database path
     pub fn db_path() -> Result<PathBuf> {
         Ok(Self::data_dir()?.join("rcal.db"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_config_path() -> PathBuf {
+        std::env::temp_dir().join(format!("rcal-config-test-{}.toml", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn test_write_and_load_roundtrip() {
+        let path = temp_config_path();
+        let config = Config::new(
+            "https://dav.example.com/",
+            "alice",
+            Some("pass show caldav".to_string()),
+        );
+        config.write_to(&path).unwrap();
+
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.server.url, "https://dav.example.com/");
+        assert_eq!(loaded.server.username, "alice");
+        assert_eq!(
+            loaded.server.password_command.as_deref(),
+            Some("pass show caldav")
+        );
+        assert_eq!(loaded.display.default_view, "today");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_password_command_is_optional() {
+        let path = temp_config_path();
+        Config::new("https://dav.example.com/", "alice", None)
+            .write_to(&path)
+            .unwrap();
+
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.server.password_command, None);
+
+        std::fs::remove_file(&path).ok();
     }
 }

@@ -10,6 +10,12 @@ is a command-line calendar tool. It keeps an offline SQLite cache of your
 events, displays day, week and month views, imports iCal (.ics) files, and
 synchronizes bidirectionally with a CalDAV server (for example Radicale,
 DAViCal, or Nextcloud Calendar).
+.PP
+Use
+.B sync
+for calendar work; first run
+.B init
+to create a config file (or write one by hand; see CONFIGURATION).
 .SH GLOBAL OPTIONS
 .TP
 .BR \-h ", " \-\-help
@@ -21,6 +27,28 @@ Print version information.
 .TP
 .B today
 Show today's events.
+.TP
+.B init
+Create a config file at the default location for CalDAV synchronization.
+When run interactively (a TTY), the server URL, username and optional
+password command are prompted for. When run non-interactively,
+.B \-\-url
+and
+.B \-\-username
+are required. Refuses to overwrite an existing config unless
+.B \-\-force
+(or explicit interactive confirmation) is given.
+.TP
+.RS
+.IP "\fB\-u, \-\-url\fR \fIURL\fR"
+CalDAV server URL.
+.IP "\fB\-\-username\fR \fIUSERNAME\fR"
+CalDAV username.
+.IP "\fB\-\-password-command\fR \fICOMMAND\fR"
+Shell command whose stdout is the password.
+.IP "\fB\-f, \-\-force\fR"
+Overwrite an existing config file.
+.RE
 .TP
 .B week
 Show an overview of the week containing the given date, or the current week.
@@ -110,8 +138,9 @@ reads a TOML configuration file. By default it looks in
 .IR $XDG_CONFIG_HOME/rcal/config.toml
 or (when that variable is unset)
 .IR ~/.config/rcal/config.toml .
-A config file is required for \fBsync\fR; create it manually if it does not
-exist.
+Create it with
+.B "rcal init"
+(see COMMANDS) or by hand; a config file is required for \fBsync\fR.
 .PP
 .nf
 [server]
@@ -159,6 +188,13 @@ Configuration file (see CONFIGURATION).
 SQLite database holding the offline event cache and sync metadata
 (etags, calendar associations).
 .SH EXAMPLES
+.PP
+Create a config file interactively, or with flags:
+.nf
+$ rcal init
+$ rcal init -u https://dav.example.com/ --username alice \\
+           --password-command "pass show caldav/alice"
+.fi
 .PP
 Show today's events:
 .nf

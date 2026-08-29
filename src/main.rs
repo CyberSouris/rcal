@@ -113,6 +113,25 @@ enum Commands {
 
     /// List available calendars
     Calendars,
+
+    /// Create a config file for CalDAV synchronization
+    Init {
+        /// CalDAV server URL (prompted if omitted)
+        #[arg(short, long)]
+        url: Option<String>,
+
+        /// CalDAV username (prompted if omitted)
+        #[arg(long)]
+        username: Option<String>,
+
+        /// Command that prints the password to stdout
+        #[arg(long)]
+        password_command: Option<String>,
+
+        /// Overwrite an existing config file
+        #[arg(short, long)]
+        force: bool,
+    },
 }
 
 #[tokio::main]
@@ -277,6 +296,14 @@ async fn main() -> anyhow::Result<()> {
                     );
                 }
             }
+        }
+        Commands::Init {
+            url,
+            username,
+            password_command,
+            force,
+        } => {
+            handle_init(url, username, password_command, force)?;
         }
     }
 
@@ -602,6 +629,82 @@ fn handle_new(
 
     db.insert_event(&event, calendar_id.as_deref(), None, None)?;
     println!("Event added.");
+    Ok(())
+}
+
+/// Handle the `init` command: create a config file from flags or prompts
+fn handle_init(
+    url_flag: Option<String>,
+    username_flag: Option<String>,
+    password_command_flag: Option<String>,
+    force: bool,
+) -> anyhow::Result<()> {
+    use std::io::IsTerminal;
+
+    let interactive = std::io::stdin().is_terminal();
+    let path = config::Config::config_path()?;
+
+    if path.exists() {
+        if !force && interactive {
+            let answer = prompt(
+                &format!("Config file exists at {}; overwrite? [y/N]", path.display()),
+                Some("n"),
+            )?
+            .unwrap_or_else(|| "n".to_string())
+            .to_lowercase();
+            if !matches!(answer.as_str(), "y" | "yes") {
+                println!("Init cancelled.");
+                return Ok(());
+            }
+        } else if !force {
+            anyhow::bail!(
+                "Config file already exists at {}. Use --force to overwrite.",
+                path.display()
+            );
+        }
+    }
+
+    let url_flag = url_flag
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let username_flag = username_flag
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let url = match url_flag {
+        Some(u) => u,
+        None if interactive => prompt("CalDAV server URL", None)?
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Server URL is required"))?,
+        None => anyhow::bail!("Missing required --url"),
+    };
+
+    let username = match username_flag {
+        Some(n) => n,
+        None if interactive => prompt("Username", None)?
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Username is required"))?,
+        None => anyhow::bail!("Missing required --username"),
+    };
+
+    let password_command = match password_command_flag {
+        Some(c) if !c.trim().is_empty() => Some(c.trim().to_string()),
+        None if interactive => prompt("Password command (prints password to stdout)", None)?,
+        _ => None,
+    };
+
+    let config = config::Config::new(url, username, password_command);
+    config.write_to(&path)?;
+
+    println!("Config file created at {}", path.display());
+    println!();
+    println!("Server:   {}", config.server.url);
+    println!("Username: {}", config.server.username);
+    println!();
+    println!(
+        "Next: run 'rcal sync' to pull your calendars. The password will be taken from\n\
+         password_command, the RCAL_PASSWORD environment variable, or an interactive prompt."
+    );
     Ok(())
 }
 

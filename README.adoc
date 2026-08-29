@@ -62,8 +62,18 @@ install -Dm755 target/release/rcal "$HOME/.local/bin/rcal"
 
 === Configuration
 
-CalDAV synchronization needs a config file. Create it at
-`~/.config/rcal/config.toml` (or `$XDG_CONFIG_HOME/rcal/config.toml`):
+Create a config file for CalDAV synchronization, either interactively or
+with flags:
+
+[source,sh]
+----
+rcal init                                              # interactive prompts
+rcal init -u https://dav.example.com/ --username alice \
+          --password-command "pass show caldav/alice"  # non-interactive
+----
+
+The file is written to `~/.config/rcal/config.toml`
+(`$XDG_CONFIG_HOME/rcal/config.toml`) and looks like this:
 
 [source,toml]
 ----
@@ -86,8 +96,8 @@ enabled = true
 reminder_minutes = [15, 5]
 ----
 
-Only the `[server]` table is required. The password is resolved in this
-order:
+Only the `[server]` table is required; it can also be written by hand and
+`rcal sync` will not overwrite it. The password is resolved in this order:
 
 1. `password_command` — a shell command whose stdout is the password
 2. the `RCAL_PASSWORD` environment variable
@@ -117,6 +127,7 @@ next time you run `rcal sync`.
 == Usage reference
 
 `rcal today`:: Show today's events
+`rcal init [-u URL] [--username USER] [--password-command CMD] [-f]`:: Create a config file
 `rcal week [-D DATE]`:: Week overview (`YYYY-MM-DD`)
 `rcal month [-M MONTH]`:: Month overview (`YYYY-MM`)
 `rcal show DATE`:: Events for a specific date
