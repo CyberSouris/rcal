@@ -241,14 +241,15 @@ impl CalDavClient {
             if !probed.insert(url.clone()) {
                 continue;
             }
-            let url = absolute_url(&self.base_url, &url);
-            let home_url = match self.propfind(&url, "0", PROPFIND_ROOT_BODY).await {
-                Ok(text) => Document::parse(&text)
-                    .ok()
-                    .and_then(|doc| calendar_home_set(&doc))
-                    .map(|home| absolute_url(&self.base_url, &home)),
-                Err(_) => None,
-            };
+            let url = resolve_href(&self.base_url, &url)?;
+            let mut home_url = None;
+            if let Some(text) = self.propfind(&url, "0", PROPFIND_ROOT_BODY).await.ok() {
+                if let Ok(doc) = Document::parse(&text) {
+                    if let Some(home) = calendar_home_set(&doc) {
+                        home_url = Some(resolve_href(&self.base_url, &home)?);
+                    }
+                }
+            }
 
             if let Some(home_url) = home_url {
                 if probed.insert(home_url.clone()) {
@@ -279,7 +280,7 @@ impl CalDavClient {
 
     /// Fetch all events from a calendar collection.
     pub async fn fetch_events(&self, calendar: &RemoteCalendar) -> Result<Vec<RemoteEvent>> {
-        let url = absolute_url(&self.base_url, &calendar.href);
+        let url = resolve_href(&self.base_url, &calendar.href)?;
         let text = self.report(&url, CALENDAR_QUERY_BODY).await?;
         let doc = Document::parse(&text)
             .with_context(|| format!("Failed to parse XML response from {}", url))?;
@@ -340,7 +341,7 @@ impl CalDavClient {
         href: &str,
         ical_data: &str,
     ) -> Result<Option<String>> {
-        let base = absolute_url(&self.base_url, &calendar.href)
+        let base = resolve_href(&self.base_url, &calendar.href)?
             .trim_end_matches('/')
             .to_string();
         let url = format!("{}/{}", base, urlencode_path_segment(href));
@@ -534,6 +535,15 @@ fn calendar_collections_from(doc: &Document, base: &str) -> Option<Vec<RemoteCal
         if !is_calendar {
             continue;
         }
+        // Reject hrefs that point outside the configured server; they must
+        // never be queried with the user's credentials.
+        let href = match resolve_href(base, &href) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("warning: {}", e);
+                continue;
+            }
+        };
         let name = prop_text(&resp, "displayname", DAV_NS).unwrap_or_else(|| {
             // Fall back to the last URL segment
             let trimmed = href.trim_end_matches('/');
@@ -541,11 +551,7 @@ fn calendar_collections_from(doc: &Document, base: &str) -> Option<Vec<RemoteCal
         });
         let color = prop_text(&resp, "calendar-color", APPLE_NS);
 
-        calendars.push(RemoteCalendar {
-            href: absolute_url(base, &href),
-            name,
-            color,
-        });
+        calendars.push(RemoteCalendar { href, name, color });
     }
 
     if calendars.is_empty() {
@@ -555,19 +561,41 @@ fn calendar_collections_from(doc: &Document, base: &str) -> Option<Vec<RemoteCal
     }
 }
 
-/// Join a possibly-relative DAV href against a base URL.
-fn absolute_url(base: &str, href: &str) -> String {
-    if href.starts_with("http://") || href.starts_with("https://") {
-        return href.to_string();
-    }
-    let Ok(base_url) = Url::parse(base) else {
-        return href.to_string();
+/// Resolve a server-provided DAV href against the configured base URL.
+///
+/// Absolute `http(s)` hrefs are only honored when they point at the exact
+/// same scheme, host, and port as the base URL. Anything else is rejected so
+/// basic-auth credentials are never sent to a host the user did not configure.
+fn resolve_href(base: &str, href: &str) -> Result<String> {
+    let base_url = Url::parse(base)
+        .with_context(|| format!("Invalid base URL in config: {}", base))?;
+
+    let mut resolved = match Url::parse(href) {
+        Ok(href_url) => {
+            if href_url.scheme() != base_url.scheme()
+                || href_url.host_str() != base_url.host_str()
+                || href_url.port_or_known_default() != base_url.port_or_known_default()
+            {
+                bail!(
+                    "Refusing href {} that does not match the configured server {}",
+                    href,
+                    base
+                );
+            }
+            href_url
+        }
+        Err(_) => base_url
+            .join(href)
+            .with_context(|| format!("Failed to resolve href {} against {}", href, base))?,
     };
-    if let Ok(joined) = base_url.join(href) {
-        joined.to_string()
-    } else {
-        href.to_string()
+
+    if resolved.set_username("").is_err() {
+        bail!("Cannot strip credentials from href {}", href);
     }
+    if resolved.set_password(None).is_err() {
+        bail!("Cannot strip password from href {}", href);
+    }
+    Ok(resolved.to_string())
 }
 
 /// Truncate a string for error messages.
@@ -733,19 +761,25 @@ END:VCALENDAR</c:calendar-data>
     }
 
     #[test]
-    fn test_absolute_url() {
+    fn test_resolve_href() {
         assert_eq!(
-            absolute_url("https://example.com/dav/", "/dav/calendars/x/"),
+            resolve_href("https://example.com/dav/", "/dav/calendars/x/").unwrap(),
             "https://example.com/dav/calendars/x/"
         );
         assert_eq!(
-            absolute_url("https://example.com/dav/", "calendars/x/"),
+            resolve_href("https://example.com/dav/", "calendars/x/").unwrap(),
             "https://example.com/dav/calendars/x/"
         );
-        assert_eq!(
-            absolute_url("https://example.com/dav/", "https://other.com/x/"),
-            "https://other.com/x/"
-        );
+        // Absolute hrefs to the configured host are fine.
+        let ok = resolve_href("https://example.com/dav/", "https://example.com/cal/x/").unwrap();
+        assert_eq!(ok, "https://example.com/cal/x/");
+        // Absolute hrefs to another host, scheme, or port are rejected.
+        assert!(resolve_href("https://example.com/dav/", "https://other.com/x/").is_err());
+        assert!(resolve_href("https://example.com/dav/", "http://example.com/x/").is_err());
+        assert!(resolve_href("https://example.com/dav/", "https://example.com:4443/x/").is_err());
+        // Userinfo embedded in an href is stripped.
+        let ok = resolve_href("https://example.com/dav/", "https://user:pw@example.com/x/").unwrap();
+        assert_eq!(ok, "https://example.com/x/");
     }
 
     #[test]
