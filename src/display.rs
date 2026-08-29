@@ -3,6 +3,12 @@ use std::collections::HashMap;
 
 use crate::ical::CalendarEvent;
 
+/// Strip control characters (including ANSI escape sequences) from untrusted
+/// text before it is written to the terminal.
+pub fn sanitize(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).collect()
+}
+
 /// Format a day view (like Today or Show <date>)
 pub fn render_day(events: &[CalendarEvent], date: NaiveDate) -> String {
     let today = Local::now().date_naive();
@@ -36,10 +42,14 @@ pub fn render_day(events: &[CalendarEvent], date: NaiveDate) -> String {
 
     for event in day_events {
         let time_str = format_event_time(event);
-        output.push_str(&format!("  {:<22} {}\n", time_str, event.summary));
+        output.push_str(&format!(
+            "  {:<22} {}\n",
+            time_str,
+            sanitize(&event.summary)
+        ));
 
         if let Some(location) = &event.location {
-            output.push_str(&format!("  {:<22}   at {}\n", "", location));
+            output.push_str(&format!("  {:<22}   at {}\n", "", sanitize(location)));
         }
     }
 
@@ -117,10 +127,14 @@ pub fn render_week(events: &[CalendarEvent], start_date: NaiveDate) -> String {
         sorted.sort_by(|a, b| a.dtstart.cmp(&b.dtstart));
         for event in sorted {
             let time_str = format_event_time(event);
-            output.push_str(&format!("  {:<22} {}\n", time_str, event.summary));
+            output.push_str(&format!(
+                "  {:<22} {}\n",
+                time_str,
+                sanitize(&event.summary)
+            ));
 
             if let Some(location) = &event.location {
-                output.push_str(&format!("  {:<22}   at {}\n", "", location));
+                output.push_str(&format!("  {:<22}   at {}\n", "", sanitize(location)));
             }
         }
     }
@@ -341,5 +355,13 @@ mod tests {
         let output = render_month(&events, month);
         assert!(output.contains("January"));
         assert!(output.contains("2024"));
+    }
+
+    #[test]
+    fn test_sanitize_strips_control_chars_and_ansi() {
+        let input = "Standup\x1b[31mRED\x1b[0m\x07\x1b]0;title\x1btail";
+        assert_eq!(sanitize(input), "Standup[31mRED[0m]0;titletail");
+        assert_eq!(sanitize("meeting\nroom"), "meetingroom");
+        assert_eq!(sanitize("plain meeting"), "plain meeting");
     }
 }

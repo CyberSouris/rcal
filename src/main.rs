@@ -184,7 +184,12 @@ async fn main() -> anyhow::Result<()> {
             println!("Found {} calendar(s):", calendars.len());
             for cal in &calendars {
                 let suffix = cal.color.as_deref().map(|c| format!(" [{}]", c)).unwrap_or_default();
-                println!("  {} ({}){}", cal.name, cal.href, suffix);
+                println!(
+                    "  {} ({}){}",
+                    display::sanitize(&cal.name),
+                    display::sanitize(&cal.href),
+                    suffix
+                );
             }
             println!();
 
@@ -195,7 +200,7 @@ async fn main() -> anyhow::Result<()> {
             for result in &summary.calendars {
                 println!(
                     "  {}: +{} added, ~{} updated, {} unchanged, -{} deleted, ↑{} pushed",
-                    result.name,
+                    display::sanitize(&result.name),
                     result.added,
                     result.updated,
                     result.unchanged,
@@ -277,7 +282,7 @@ async fn main() -> anyhow::Result<()> {
                 println!();
                 for event in matches {
                     let time_str = format_event_time(event);
-                    println!("  {:<28} {}", time_str, event.summary);
+                    println!("  {:<28} {}", time_str, display::sanitize(&event.summary));
                 }
             }
         }
@@ -291,7 +296,7 @@ async fn main() -> anyhow::Result<()> {
                     println!(
                         "{} {:<28} {} event(s)",
                         color_swatch(calendar.color.as_deref()),
-                        calendar.name,
+                        display::sanitize(&calendar.name),
                         calendar.event_count
                     );
                 }
@@ -317,7 +322,7 @@ fn handle_import(file: &std::path::Path, add: bool, dry_run: bool) -> anyhow::Re
 
     println!(
         "Parsed calendar: {}",
-        calendar.name.as_deref().unwrap_or("Unknown")
+        display::sanitize(calendar.name.as_deref().unwrap_or("Unknown"))
     );
     println!("Found {} events:", calendar.events.len());
     println!();
@@ -328,19 +333,19 @@ fn handle_import(file: &std::path::Path, add: bool, dry_run: bool) -> anyhow::Re
         let status_str = event
             .status
             .as_ref()
-            .map(|s| format!(" [{}]", s))
+            .map(|s| format!(" [{}]", display::sanitize(s)))
             .unwrap_or_default();
 
         let location_str = event
             .location
             .as_ref()
-            .map(|l| format!(" @ {}", l))
+            .map(|l| format!(" @ {}", display::sanitize(l)))
             .unwrap_or_default();
 
         println!(
             "{}. {}{}{} - {}",
             i + 1,
-            event.summary,
+            display::sanitize(&event.summary),
             status_str,
             location_str,
             time_str
@@ -358,7 +363,7 @@ fn handle_import(file: &std::path::Path, add: bool, dry_run: bool) -> anyhow::Re
                 let conflicts = db.find_conflicts(start, end, Some(&event.uid))?;
                 if !conflicts.is_empty() {
                     for conflict in &conflicts {
-                        println!("   ⚠ CONFLICT: {} {}", conflict.summary, format_event_time(conflict));
+                        println!("   ⚠ CONFLICT: {} {}", display::sanitize(&conflict.summary), format_event_time(conflict));
                     }
                 }
             }
@@ -455,7 +460,7 @@ fn handle_new(
                 None => {
                     println!("Available calendars:");
                     for c in &calendars {
-                        println!("  - {} ({})", c.name, c.id);
+                        println!("  - {} ({})", display::sanitize(&c.name), display::sanitize(&c.id));
                     }
                     anyhow::bail!(
                         "Unknown calendar '{}'. Pass one of the names/URLs above with --calendar.",
@@ -474,7 +479,7 @@ fn handle_new(
             } else if interactive {
                 println!("Select a calendar:");
                 for (i, c) in calendars.iter().enumerate() {
-                    println!("  {}. {} {}", i + 1, color_swatch(c.color.as_deref()), c.name);
+                    println!("  {}. {} {}", i + 1, color_swatch(c.color.as_deref()), display::sanitize(&c.name));
                 }
                 let choice = prompt(
                     &format!("Calendar [1-{}]", calendars.len()),
@@ -613,7 +618,7 @@ fn handle_new(
         color_swatch(calendar_id.as_deref().and_then(|id| {
             calendars.iter().find(|c| c.id == *id).and_then(|c| c.color.as_deref())
         })),
-        event.summary,
+        display::sanitize(&event.summary),
         format_event_time(&event)
     );
 
