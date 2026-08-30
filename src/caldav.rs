@@ -120,6 +120,32 @@ pub fn resolve_password(config: &Config) -> Result<String> {
     Ok(password)
 }
 
+/// Refuse to send credentials to remote hosts over plaintext HTTP.
+/// Loopback addresses (used for local servers and testing) are allowed.
+fn validate_scheme(base_url: &str) -> Result<()> {
+    let url =
+        Url::parse(base_url).with_context(|| format!("Invalid server URL: {}", base_url))?;
+    if url.scheme() == "https" {
+        return Ok(());
+    }
+    if url.scheme() == "http" && url.host().is_some_and(is_loopback_host) {
+        return Ok(());
+    }
+    bail!(
+        "Refusing to send credentials over plaintext HTTP to {}. \
+         Use an https:// URL for remote servers.",
+        base_url
+    );
+}
+
+fn is_loopback_host(host: url::Host<&str>) -> bool {
+    match host {
+        url::Host::Domain(d) => d == "localhost",
+        url::Host::Ipv4(ip) => ip.is_loopback(),
+        url::Host::Ipv6(ip) => ip.is_loopback(),
+    }
+}
+
 /// HTTP client for interacting with a CalDAV server
 pub struct CalDavClient {
     http: reqwest::Client,
@@ -130,6 +156,7 @@ pub struct CalDavClient {
 
 impl CalDavClient {
     pub fn new(config: &Config) -> Result<Self> {
+        validate_scheme(&config.server.url)?;
         let password = resolve_password(config)?;
         let http = reqwest::Client::builder()
             .user_agent(concat!("rcal/", env!("CARGO_PKG_VERSION")))
@@ -146,6 +173,7 @@ impl CalDavClient {
     /// Convenience for tests with an explicit password
     #[cfg(test)]
     pub fn from_parts(base_url: &str, username: &str, password: &str) -> Result<Self> {
+        validate_scheme(base_url)?;
         let http = reqwest::Client::builder()
             .user_agent(concat!("rcal/", env!("CARGO_PKG_VERSION")))
             .build()
@@ -780,6 +808,20 @@ END:VCALENDAR</c:calendar-data>
         // Userinfo embedded in an href is stripped.
         let ok = resolve_href("https://example.com/dav/", "https://user:pw@example.com/x/").unwrap();
         assert_eq!(ok, "https://example.com/x/");
+    }
+
+    #[test]
+    fn test_validate_scheme() {
+        // HTTPS is always allowed.
+        assert!(validate_scheme("https://calendar.example.com/dav/").is_ok());
+        assert!(validate_scheme("https://127.0.0.1:5232/").is_ok());
+        // Plaintext HTTP to remote hosts is refused.
+        assert!(validate_scheme("http://calendar.example.com/dav/").is_err());
+        // Plaintext HTTP to loopback is allowed for local servers.
+        assert!(validate_scheme("http://127.0.0.1:5232/").is_ok());
+        assert!(validate_scheme("http://127.0.0.2/dav/").is_ok());
+        assert!(validate_scheme("http://localhost:5232/").is_ok());
+        assert!(validate_scheme("http://[::1]:5232/").is_ok());
     }
 
     #[test]
