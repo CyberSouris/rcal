@@ -122,8 +122,21 @@ impl Config {
             toml::to_string(self).context("Failed to serialize config file")?;
         fs::write(path, content)
             .with_context(|| format!("Failed to write config file: {}", path.display()))?;
+        Self::restrict_permissions(path);
         Ok(())
     }
+
+    /// Restrict the config file to owner-only access on Unix. This is applied
+    /// on write only; if the user later changes the permissions, rcal leaves
+    /// them alone.
+    #[cfg(unix)]
+    fn restrict_permissions(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+
+    #[cfg(not(unix))]
+    fn restrict_permissions(_path: &Path) {}
 
     /// Load configuration from default location
     pub fn load() -> Result<Self> {
@@ -209,6 +222,22 @@ mod tests {
 
         let loaded = Config::load_from(&path).unwrap();
         assert_eq!(loaded.server.password_command, None);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_config_written_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = temp_config_path();
+        Config::new("https://dav.example.com/", "alice", None)
+            .write_to(&path)
+            .unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
 
         std::fs::remove_file(&path).ok();
     }
