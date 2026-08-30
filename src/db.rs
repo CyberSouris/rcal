@@ -94,9 +94,8 @@ impl Database {
                 );
 
                 CREATE TABLE IF NOT EXISTS events (
-                    id TEXT PRIMARY KEY,
-                    calendar_id TEXT REFERENCES calendars(id),
                     uid TEXT NOT NULL,
+                    calendar_id TEXT REFERENCES calendars(id),
                     summary TEXT,
                     description TEXT,
                     location TEXT,
@@ -112,13 +111,83 @@ impl Database {
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     synced_at DATETIME
                 );
+                ",
+            )
+            .context("Failed to initialize database schema")?;
 
+        if self.has_legacy_schema()? {
+            self.migrate_legacy_events()?;
+        }
+
+        // Events are keyed per (calendar_id, uid) so that the same UID in two
+        // calendars does not collide.
+        self.conn
+            .execute_batch(
+                "
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_events_calendar_uid
+                    ON events(calendar_id, uid);
                 CREATE INDEX IF NOT EXISTS idx_events_calendar ON events(calendar_id);
                 CREATE INDEX IF NOT EXISTS idx_events_date ON events(dtstart, dtend);
                 CREATE INDEX IF NOT EXISTS idx_events_uid ON events(uid);
                 ",
             )
-            .context("Failed to initialize database schema")?;
+            .context("Failed to create database indexes")?;
+
+        Ok(())
+    }
+
+    /// Detect a database created with the legacy schema, where `events.id`
+    /// (primary key) was set to the event UID and events therefore could not
+    /// belong to more than one calendar.
+    fn has_legacy_schema(&self) -> Result<bool> {
+        let mut stmt =
+            self.conn
+                .prepare("SELECT COUNT(*) FROM pragma_table_info('events') WHERE name = 'id'")?;
+        let count: i64 = stmt.query_row([], |row| row.get(0))?;
+        Ok(count > 0)
+    }
+
+    /// Rebuild the events table without the legacy `id` column so events are
+    /// keyed on (calendar_id, uid). Existing rows are preserved.
+    fn migrate_legacy_events(&self) -> Result<()> {
+        self.conn
+            .execute_batch(
+                "
+                BEGIN;
+                ALTER TABLE events RENAME TO events_legacy;
+                CREATE TABLE events (
+                    uid TEXT NOT NULL,
+                    calendar_id TEXT REFERENCES calendars(id),
+                    summary TEXT,
+                    description TEXT,
+                    location TEXT,
+                    dtstart DATETIME,
+                    dtend DATETIME,
+                    all_day BOOLEAN DEFAULT FALSE,
+                    status TEXT,
+                    recurrence TEXT,
+                    ical_data TEXT,
+                    etag TEXT,
+                    last_modified DATETIME,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    synced_at DATETIME
+                );
+                INSERT INTO events (
+                    uid, calendar_id, summary, description, location,
+                    dtstart, dtend, all_day, status, recurrence,
+                    ical_data, etag, last_modified, created_at, updated_at, synced_at
+                )
+                SELECT
+                    uid, calendar_id, summary, description, location,
+                    dtstart, dtend, all_day, status, recurrence,
+                    ical_data, etag, last_modified, created_at, updated_at, synced_at
+                FROM events_legacy;
+                DROP TABLE events_legacy;
+                COMMIT;
+                ",
+            )
+            .context("Failed to migrate events table to per-calendar UIDs")?;
 
         Ok(())
     }
@@ -141,7 +210,7 @@ impl Database {
             .conn
             .prepare(
                 "SELECT c.id, c.name, c.color,
-                        COUNT(e.id) as event_count
+                        COUNT(e.uid) as event_count
                  FROM calendars c
                  LEFT JOIN events e ON e.calendar_id = c.id
                  GROUP BY c.id
@@ -173,14 +242,13 @@ impl Database {
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
-            "INSERT OR REPLACE INTO events
-             (id, calendar_id, uid, summary, description, location,
+            "INSERT INTO events
+             (uid, calendar_id, summary, description, location,
               dtstart, dtend, all_day, status, recurrence, ical_data, etag, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 event.uid.clone(),
                 calendar_id,
-                event.uid.clone(),
                 event.summary,
                 event.description,
                 event.location,
@@ -341,7 +409,7 @@ impl Database {
                 etag = ?13,
                 updated_at = ?11,
                 last_modified = ?11
-             WHERE uid = ?1",
+             WHERE calendar_id IS ?12 AND uid = ?1",
             params![
                 event.uid,
                 event.summary,
@@ -366,9 +434,12 @@ impl Database {
         Ok(())
     }
 
-    /// Delete an event by UID
-    pub fn delete_event(&self, uid: &str) -> Result<()> {
-        self.conn.execute("DELETE FROM events WHERE uid = ?1", params![uid])?;
+    /// Delete an event scoped to a calendar and UID
+    pub fn delete_event(&self, calendar_id: Option<&str>, uid: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM events WHERE calendar_id IS ?1 AND uid = ?2",
+            params![calendar_id, uid],
+        )?;
         Ok(())
     }
 
@@ -408,7 +479,7 @@ impl Database {
         self.conn.execute(
             "UPDATE events SET calendar_id = ?2, etag = ?3, ical_data = ?4,
                  synced_at = CURRENT_TIMESTAMP
-             WHERE uid = ?1",
+             WHERE calendar_id IS ?2 AND uid = ?1",
             params![uid, calendar_id, etag, ical_data],
         )?;
         Ok(())
@@ -608,9 +679,102 @@ mod tests {
 
         assert!(db.event_exists("uid-1").unwrap());
 
-        db.delete_event("uid-1").unwrap();
+        db.delete_event(None, "uid-1").unwrap();
         assert!(!db.event_exists("uid-1").unwrap());
         assert!(db.get_all_events(None, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_same_uid_in_multiple_calendars_is_scoped() {
+        let db = test_db();
+        db.insert_calendar("cal-a", "Alpha", None).unwrap();
+        db.insert_calendar("cal-b", "Bravo", None).unwrap();
+        let e = event("uid-shared", "Shared", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0));
+        db.insert_event(&e, Some("cal-a"), None, None).unwrap();
+        db.insert_event(&e, Some("cal-b"), None, None).unwrap();
+
+        // Both calendars have their own copy of the UID.
+        assert_eq!(db.get_events_for_calendar("cal-a").unwrap().len(), 1);
+        assert_eq!(db.get_events_for_calendar("cal-b").unwrap().len(), 1);
+
+        // Upserting into one calendar does not leak into the other.
+        let renamed = {
+            let mut e2 = e;
+            e2.summary = "Renamed in B".to_string();
+            e2
+        };
+        db.upsert_event(&renamed, Some("cal-b"), None, None).unwrap();
+        let cal_a = db.get_events_for_calendar("cal-a").unwrap();
+        let cal_b = db.get_events_for_calendar("cal-b").unwrap();
+        assert_eq!(cal_a[0].event.summary, "Shared");
+        assert_eq!(cal_b[0].event.summary, "Renamed in B");
+        assert_eq!(db.get_all_events(None, None).unwrap().len(), 2);
+
+        // Deleting from one calendar leaves the other untouched.
+        db.delete_event(Some("cal-a"), "uid-shared").unwrap();
+        assert!(db.get_events_for_calendar("cal-a").unwrap().is_empty());
+        assert_eq!(db.get_events_for_calendar("cal-b").unwrap().len(), 1);
+        assert_eq!(db.get_all_events(None, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_legacy_schema_is_migrated() {
+        let path = std::env::temp_dir().join(format!("rcal-migrate-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "
+                CREATE TABLE calendars (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    color TEXT,
+                    ctag TEXT,
+                    sync_token TEXT
+                );
+                CREATE TABLE events (
+                    id TEXT PRIMARY KEY,
+                    calendar_id TEXT REFERENCES calendars(id),
+                    uid TEXT NOT NULL,
+                    summary TEXT,
+                    description TEXT,
+                    location TEXT,
+                    dtstart DATETIME,
+                    dtend DATETIME,
+                    all_day BOOLEAN DEFAULT FALSE,
+                    status TEXT,
+                    recurrence TEXT,
+                    ical_data TEXT,
+                    etag TEXT,
+                    last_modified DATETIME,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    synced_at DATETIME
+                );
+                INSERT INTO calendars (id, name) VALUES ('cal-a', 'Legacy');
+                INSERT INTO events (id, uid, calendar_id, summary, etag, dtstart)
+                    VALUES ('uid-old', 'uid-old', 'cal-a', 'Old Event', 'abc', '2024-01-15T09:00:00+00:00');
+                ",
+            )
+            .unwrap();
+        }
+
+        let db = Database::open_from(&path).unwrap();
+        let stored = db.get_events_for_calendar("cal-a").unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].event.uid, "uid-old");
+        assert_eq!(stored[0].event.summary, "Old Event");
+        assert_eq!(stored[0].etag.as_deref(), Some("abc"));
+
+        // The legacy `id` column is gone and date/nullable columns survive.
+        let col_count: i64 = {
+            let conn = &db.conn;
+            let mut stmt = conn.prepare("SELECT 1 FROM pragma_table_info('events') WHERE name = 'id'").unwrap();
+            let exists = stmt.query_row([], |_| Ok(1)).unwrap_or(0);
+            exists
+        };
+        assert_eq!(col_count, 0, "legacy id column should be migrated away");
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

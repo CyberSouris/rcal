@@ -459,7 +459,7 @@ impl CalDavClient {
         // Only events that were previously synced (have an etag) are considered.
         for (uid, ls) in local_by_uid.iter() {
             if !remote_uids.contains(uid) && ls.etag.is_some() {
-                db.delete_event(uid)?;
+                db.delete_event(Some(&cal.href), uid)?;
                 result.deleted += 1;
             }
         }
@@ -877,7 +877,7 @@ END:VCALENDAR</c:calendar-data>
                 local.iter().map(|s| (s.event.uid.clone(), s)).collect();
             for (uid, ls) in local_by_uid.iter() {
                 if !remote_uids.contains(uid) && ls.etag.is_some() {
-                    db.delete_event(uid).unwrap();
+                    db.delete_event(Some(&cal.href), uid).unwrap();
                     result.deleted += 1;
                 }
             }

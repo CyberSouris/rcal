@@ -208,9 +208,9 @@ CREATE TABLE calendars (
     sync_token TEXT
 );
 
--- Events
+-- Events (keyed per calendar on (calendar_id, uid); the same UID may
+-- appear in several calendars)
 CREATE TABLE events (
-    id TEXT PRIMARY KEY,
     calendar_id TEXT REFERENCES calendars(id),
     uid TEXT NOT NULL,
     summary TEXT,
@@ -230,6 +230,7 @@ CREATE TABLE events (
 );
 
 -- Indexes for common queries
+CREATE UNIQUE INDEX idx_events_calendar_uid ON events(calendar_id, uid);
 CREATE INDEX idx_events_calendar ON events(calendar_id);
 CREATE INDEX idx_events_date ON events(dtstart, dtend);
 CREATE INDEX idx_events_uid ON events(uid);
