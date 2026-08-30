@@ -33,13 +33,51 @@ impl Database {
 
     /// Open database from a specific path
     pub fn open_from(path: &Path) -> Result<Self> {
+        let existed = path.exists();
         let conn = Connection::open(path)
             .with_context(|| format!("Failed to open database: {}", path.display()))?;
 
         let db = Self { conn };
         db.init_schema()?;
+        db.secure_file_permissions(path, existed)?;
 
         Ok(db)
+    }
+
+    /// Ensure a file-backed database is only accessible to the owner. The
+    /// database contains calendar data (meetings, locations, notes) and must
+    /// not be readable by other local users. A freshly created database is
+    /// created 0600; an existing one more permissive than 0600 is reported
+    /// and tightened back to 0600.
+    #[cfg(unix)]
+    fn secure_file_permissions(&self, path: &Path, existed: bool) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        if path.as_os_str() == ":memory:" {
+            return Ok(());
+        }
+        let Some(metadata) = std::fs::metadata(path).ok() else {
+            return Ok(());
+        };
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            if existed {
+                eprintln!(
+                    "Warning: {} has permissions {:03o}; restricting to 0600.",
+                    path.display(),
+                    mode
+                );
+            }
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).with_context(
+                || format!("Failed to restrict permissions on {}", path.display()),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn secure_file_permissions(&self, _path: &Path, _existed: bool) -> Result<()> {
+        Ok(())
     }
 
     /// Initialize database schema
@@ -734,5 +772,54 @@ mod tests {
         let db = test_db();
         assert!(!db.event_exists("").unwrap());
         assert!(!db.event_exists("   ").unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_database_file_created_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!("rcal-db-test-{}.db", uuid::Uuid::new_v4()));
+        {
+            let db = Database::open_from(&path).unwrap();
+            db.insert_event(
+                &event("uid-1", "Secret", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0)),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        }
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_database_restricts_overpermissive_existing_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!("rcal-db-test-{}.db", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        {
+            let db = Database::open_from(&path).unwrap();
+            db.insert_event(
+                &event("uid-1", "Secret", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0)),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        }
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        std::fs::remove_file(&path).ok();
     }
 }
