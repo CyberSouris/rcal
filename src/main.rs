@@ -605,6 +605,7 @@ fn handle_new(
         summary: title,
         description,
         location,
+        url: None,
         dtstart: Some(dtstart),
         dtend: Some(dtend),
         all_day,

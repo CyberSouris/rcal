@@ -99,6 +99,7 @@ impl Database {
                     summary TEXT,
                     description TEXT,
                     location TEXT,
+                    url TEXT,
                     dtstart DATETIME,
                     dtend DATETIME,
                     all_day BOOLEAN DEFAULT FALSE,
@@ -118,6 +119,7 @@ impl Database {
         if self.has_legacy_schema()? {
             self.migrate_legacy_events()?;
         }
+        self.ensure_event_column("url")?;
 
         // Events are keyed per (calendar_id, uid) so that the same UID in two
         // calendars does not collide.
@@ -161,6 +163,7 @@ impl Database {
                     summary TEXT,
                     description TEXT,
                     location TEXT,
+                    url TEXT,
                     dtstart DATETIME,
                     dtend DATETIME,
                     all_day BOOLEAN DEFAULT FALSE,
@@ -189,6 +192,22 @@ impl Database {
             )
             .context("Failed to migrate events table to per-calendar UIDs")?;
 
+        Ok(())
+    }
+
+    /// Add a column to the events table if it is missing (handles databases
+    /// created by older versions of rcal).
+    fn ensure_event_column(&self, column: &str) -> Result<()> {
+        let mut stmt = self.conn.prepare(
+            "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name = ?1",
+        )?;
+        let count: i64 = stmt.query_row(params![column], |row| row.get(0))?;
+        if count == 0 {
+            self.conn.execute(
+                &format!("ALTER TABLE events ADD COLUMN {} TEXT", column),
+                [],
+            )?;
+        }
         Ok(())
     }
 
@@ -243,15 +262,16 @@ impl Database {
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
             "INSERT INTO events
-             (uid, calendar_id, summary, description, location,
+             (uid, calendar_id, summary, description, location, url,
               dtstart, dtend, all_day, status, recurrence, ical_data, etag, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 event.uid.clone(),
                 calendar_id,
                 event.summary,
                 event.description,
                 event.location,
+                event.url,
                 event.dtstart.map(|d| d.to_rfc3339()),
                 event.dtend.map(|d| d.to_rfc3339()),
                 event.all_day,
@@ -288,7 +308,7 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT uid, summary, description, location,
+                "SELECT uid, summary, description, location, url,
                         dtstart, dtend, all_day, status, recurrence
                  FROM events
                  WHERE dtstart IS NOT NULL
@@ -309,7 +329,7 @@ impl Database {
     /// Get all events (optionally filtered by a date range)
     pub fn get_all_events(&self, from: Option<DateTime<Utc>>, to: Option<DateTime<Utc>>) -> Result<Vec<CalendarEvent>> {
         let mut sql = String::from(
-            "SELECT uid, summary, description, location,
+            "SELECT uid, summary, description, location, url,
                     dtstart, dtend, all_day, status, recurrence
              FROM events
              WHERE dtstart IS NOT NULL",
@@ -349,7 +369,7 @@ impl Database {
 
         let sql = match exclude_uid {
             Some(_) => String::from(
-                "SELECT uid, summary, description, location,
+                "SELECT uid, summary, description, location, url,
                         dtstart, dtend, all_day, status, recurrence
                  FROM events
                  WHERE dtstart IS NOT NULL
@@ -359,7 +379,7 @@ impl Database {
                  ORDER BY dtstart",
             ),
             None => String::from(
-                "SELECT uid, summary, description, location,
+                "SELECT uid, summary, description, location, url,
                         dtstart, dtend, all_day, status, recurrence
                  FROM events
                  WHERE dtstart IS NOT NULL
@@ -399,22 +419,24 @@ impl Database {
                 summary = ?2,
                 description = ?3,
                 location = ?4,
-                dtstart = ?5,
-                dtend = ?6,
-                all_day = ?7,
-                status = ?8,
-                recurrence = ?9,
-                ical_data = ?10,
-                calendar_id = ?12,
-                etag = ?13,
-                updated_at = ?11,
-                last_modified = ?11
-             WHERE calendar_id IS ?12 AND uid = ?1",
+                url = ?5,
+                dtstart = ?6,
+                dtend = ?7,
+                all_day = ?8,
+                status = ?9,
+                recurrence = ?10,
+                ical_data = ?11,
+                calendar_id = ?13,
+                etag = ?14,
+                updated_at = ?12,
+                last_modified = ?12
+             WHERE calendar_id IS ?13 AND uid = ?1",
             params![
                 event.uid,
                 event.summary,
                 event.description,
                 event.location,
+                event.url,
                 event.dtstart.map(|d| d.to_rfc3339()),
                 event.dtend.map(|d| d.to_rfc3339()),
                 event.all_day,
@@ -445,7 +467,7 @@ impl Database {
 
     /// Get all events belonging to a specific calendar, with sync metadata
     pub fn get_events_for_calendar(&self, calendar_id: &str) -> Result<Vec<StoredEvent>> {
-        let sql = "SELECT uid, summary, description, location,
+        let sql = "SELECT uid, summary, description, location, url,
                           dtstart, dtend, all_day, status, recurrence,
                           etag
                    FROM events
@@ -456,7 +478,7 @@ impl Database {
         let mut stmt = self.conn.prepare(sql)?;
 
         let rows = stmt.query_map(params![calendar_id], |row| {
-            let etag: Option<String> = row.get(9)?;
+            let etag: Option<String> = row.get(10)?;
 
             Ok(StoredEvent {
                 event: event_stub_from_row(row),
@@ -486,24 +508,25 @@ impl Database {
     }
 }
 
-/// Map the event portion of a database row (columns 0-8) to a CalendarEvent
+/// Map the event portion of a database row (columns 0-9) to a CalendarEvent
 fn event_stub_from_row(row: &rusqlite::Row) -> CalendarEvent {
-    let dtstart: Option<String> = row.get(4).unwrap_or(None);
-    let dtend: Option<String> = row.get(5).unwrap_or(None);
-    let all_day: bool = row.get(6).unwrap_or(false);
+    let dtstart: Option<String> = row.get(5).unwrap_or(None);
+    let dtend: Option<String> = row.get(6).unwrap_or(None);
+    let all_day: bool = row.get(7).unwrap_or(false);
 
     CalendarEvent {
         uid: row.get(0).unwrap_or_default(),
         summary: row.get(1).unwrap_or_default(),
         description: row.get(2).unwrap_or(None),
         location: row.get(3).unwrap_or(None),
+        url: row.get(4).unwrap_or(None),
         dtstart: dtstart.and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
             .map(|d| d.with_timezone(&Utc)),
         dtend: dtend.and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
             .map(|d| d.with_timezone(&Utc)),
         all_day,
-        status: row.get(7).unwrap_or(None),
-        recurrence: row.get(8).unwrap_or(None),
+        status: row.get(8).unwrap_or(None),
+        recurrence: row.get(9).unwrap_or(None),
     }
 }
 
@@ -558,6 +581,7 @@ mod tests {
             summary: summary.to_string(),
             description: Some(format!("Description for {}", summary)),
             location: Some("Test Room".to_string()),
+            url: None,
             dtstart: Some(start),
             dtend: Some(end),
             all_day: false,
@@ -921,12 +945,14 @@ mod tests {
         let mut e = event("uid-1", "Rich Event", dt(2024, 3, 15, 10, 0), dt(2024, 3, 15, 12, 0));
         e.description = Some("Long detailed description\nwith line breaks".to_string());
         e.location = Some("Main Auditorium".to_string());
+        e.url = Some("https://meet.example.com/rich-event".to_string());
         e.recurrence = Some("FREQ=YEARLY".to_string());
         db.insert_event(&e, None, None, None).unwrap();
 
         let events = db.get_all_events(None, None).unwrap();
         assert_eq!(events[0].description.as_deref(), Some("Long detailed description\nwith line breaks"));
         assert_eq!(events[0].location.as_deref(), Some("Main Auditorium"));
+        assert_eq!(events[0].url.as_deref(), Some("https://meet.example.com/rich-event"));
         assert_eq!(events[0].recurrence.as_deref(), Some("FREQ=YEARLY"));
         assert_eq!(events[0].status.as_deref(), Some("CONFIRMED"));
     }
@@ -985,5 +1011,71 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600);
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_url_column_added_to_existing_db() {
+        let path = std::env::temp_dir().join(format!("rcal-url-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "
+                CREATE TABLE calendars (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    color TEXT,
+                    ctag TEXT,
+                    sync_token TEXT
+                );
+                CREATE TABLE events (
+                    uid TEXT NOT NULL,
+                    calendar_id TEXT REFERENCES calendars(id),
+                    summary TEXT,
+                    description TEXT,
+                    location TEXT,
+                    dtstart DATETIME,
+                    dtend DATETIME,
+                    all_day BOOLEAN DEFAULT FALSE,
+                    status TEXT,
+                    recurrence TEXT,
+                    ical_data TEXT,
+                    etag TEXT,
+                    last_modified DATETIME,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    synced_at DATETIME
+                );
+                INSERT INTO calendars (id, name) VALUES ('cal-a', 'Modern');
+                INSERT INTO events (uid, calendar_id, summary, dtstart)
+                    VALUES ('uid-1', 'cal-a', 'Old Event', '2024-01-15T09:00:00+00:00');
+                ",
+            )
+            .unwrap();
+        }
+
+        let db = Database::open_from(&path).unwrap();
+
+        // The url column is added and existing rows remain readable.
+        let col_count: i64 = {
+            let conn = &db.conn;
+            let mut stmt = conn.prepare("SELECT COUNT(*) FROM pragma_table_info('events') WHERE name = 'url'").unwrap();
+            stmt.query_row([], |row| row.get(0)).unwrap()
+        };
+        assert_eq!(col_count, 1, "url column should be added");
+
+        let stored = db.get_events_for_calendar("cal-a").unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].event.uid, "uid-1");
+        assert_eq!(stored[0].event.url, None);
+
+        // New events can store a URL.
+        let mut e = event("uid-2", "With Link", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0));
+        e.url = Some("https://meet.example.com/abc".to_string());
+        db.insert_event(&e, Some("cal-a"), None, None).unwrap();
+        let stored = db.get_events_for_calendar("cal-a").unwrap();
+        assert_eq!(stored[1].event.url.as_deref(), Some("https://meet.example.com/abc"));
+
+        std::fs::remove_file(&path).unwrap();
     }
 }

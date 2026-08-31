@@ -11,6 +11,7 @@ pub struct CalendarEvent {
     pub summary: String,
     pub description: Option<String>,
     pub location: Option<String>,
+    pub url: Option<String>,
     pub dtstart: Option<DateTime<Utc>>,
     pub dtend: Option<DateTime<Utc>>,
     pub all_day: bool,
@@ -91,6 +92,7 @@ pub(crate) fn parse_event(ical_event: &ical::parser::ical::component::IcalEvent)
     let mut summary = String::new();
     let mut description = None;
     let mut location = None;
+    let mut url = None;
     let mut dtstart = None;
     let mut dtend = None;
     let mut all_day = false;
@@ -114,6 +116,11 @@ pub(crate) fn parse_event(ical_event: &ical::parser::ical::component::IcalEvent)
             }
             "LOCATION" => {
                 location = property.value.as_deref().map(unescape_ical_text);
+            }
+            "URL" | "X-MICROSOFT-SKYPETEAMSMEETINGURL" | "X-GOOGLE-CONFERENCE" => {
+                if url.is_none() {
+                    url = property.value.clone();
+                }
             }
             "DTSTART" => {
                 if let Some(value) = &property.value {
@@ -145,6 +152,7 @@ pub(crate) fn parse_event(ical_event: &ical::parser::ical::component::IcalEvent)
         summary,
         description,
         location,
+        url,
         dtstart,
         dtend,
         all_day,
@@ -193,7 +201,7 @@ pub fn export_ical(event: &CalendarEvent) -> String {
     out.push_str("BEGIN:VEVENT\r\n");
 
     // Required properties
-    out.push_str(&fold_line(&format!("UID:{}", event.uid)));
+    out.push_str(&fold_line(&format!("UID:{}", strip_control_chars(&event.uid))));
     out.push_str("\r\n");
     out.push_str(&format!("DTSTAMP:{}\r\n", Utc::now().format("%Y%m%dT%H%M%SZ")));
 
@@ -219,7 +227,7 @@ pub fn export_ical(event: &CalendarEvent) -> String {
         ("SUMMARY", escape_ical_text(event.summary.as_str())),
         ("DESCRIPTION", escape_ical_text(event.description.as_deref().unwrap_or(""))),
         ("LOCATION", escape_ical_text(event.location.as_deref().unwrap_or(""))),
-        ("STATUS", event.status.as_deref().unwrap_or("").to_string()),
+        ("STATUS", strip_control_chars(event.status.as_deref().unwrap_or(""))),
     ] {
         if !value.is_empty() {
             out.push_str(&fold_line(&format!("{}:{}", name, value)));
@@ -228,13 +236,33 @@ pub fn export_ical(event: &CalendarEvent) -> String {
     }
 
     if let Some(rrule) = &event.recurrence {
-        out.push_str(&fold_line(&format!("RRULE:{}", rrule)));
-        out.push_str("\r\n");
+        if !rrule.is_empty() {
+            out.push_str(&fold_line(&format!("RRULE:{}", strip_control_chars(rrule))));
+            out.push_str("\r\n");
+        }
+    }
+
+    // Meeting link / URL. URIs are not TEXT-escaped; strip control characters
+    // (incl. CR/LF) so a crafted value cannot smuggle extra content lines
+    // into the exported .ics.
+    if let Some(url) = &event.url {
+        if !url.is_empty() {
+            out.push_str(&fold_line(&format!("URL:{}", strip_control_chars(url))));
+            out.push_str("\r\n");
+        }
     }
 
     out.push_str("END:VEVENT\r\n");
     out.push_str("END:VCALENDAR\r\n");
     out
+}
+
+/// Delete control characters (incl. CR/LF, ESC, and other ANSI/C1 controls)
+/// from values that are written into an .ics content line without RFC 5545
+/// TEXT escaping (URIs, RRULE, UID, STATUS). Raw control characters would
+/// otherwise break the line structure of the exported calendar.
+fn strip_control_chars(value: &str) -> String {
+    value.chars().filter(|c| !c.is_control()).collect()
 }
 
 /// Escape a TEXT property value per RFC 5545: backslash, semicolon, comma
@@ -329,6 +357,7 @@ mod tests {
             summary: "Design Review".to_string(),
             description: Some("A long description that goes well beyond seventy-five characters in total length to exercise the line folding logic".to_string()),
             location: Some("Room 42".to_string()),
+            url: Some("https://meet.example.com/design-review".to_string()),
             dtstart: Some(dtstart),
             dtend: Some(dtend),
             all_day: false,
@@ -344,6 +373,7 @@ mod tests {
         assert_eq!(back.summary, "Design Review");
         assert_eq!(back.description, event.description);
         assert_eq!(back.location.as_deref(), Some("Room 42"));
+        assert_eq!(back.url.as_deref(), Some("https://meet.example.com/design-review"));
         assert_eq!(back.status.as_deref(), Some("CONFIRMED"));
         assert_eq!(back.recurrence.as_deref(), Some("FREQ=WEEKLY;COUNT=4"));
         assert_eq!(back.dtstart.unwrap(), dtstart);
@@ -357,6 +387,7 @@ mod tests {
             summary: "Lunch, pizza; with back\\slash".to_string(),
             description: Some("Line one\nLine two".to_string()),
             location: Some("Café 5; Room B".to_string()),
+            url: Some("https://example.com/x?a=1&b=2".to_string()),
             dtstart: Some(parse_ical_datetime("20240506T090000Z").unwrap()),
             dtend: Some(parse_ical_datetime("20240506T100000Z").unwrap()),
             all_day: false,
@@ -369,6 +400,7 @@ mod tests {
         assert!(ical.contains("SUMMARY:Lunch\\, pizza\\; with back\\\\slash"));
         assert!(ical.contains("DESCRIPTION:Line one\\nLine two"));
         assert!(ical.contains("LOCATION:Café 5\\; Room B"));
+        assert!(ical.contains("URL:https://example.com/x?a=1&b=2"));
 
         // And the round-trip restores the original text exactly.
         let reparsed = parse_ical_text(&ical).unwrap();
@@ -376,6 +408,33 @@ mod tests {
         assert_eq!(back.summary, "Lunch, pizza; with back\\slash");
         assert_eq!(back.description.as_deref(), Some("Line one\nLine two"));
         assert_eq!(back.location.as_deref(), Some("Café 5; Room B"));
+        assert_eq!(back.url.as_deref(), Some("https://example.com/x?a=1&b=2"));
+    }
+
+    #[test]
+    fn test_export_strips_control_chars_from_unhandled_properties() {
+        let event = CalendarEvent {
+            uid: "bad\nUID\r\nsekret".to_string(),
+            summary: "Meeting".to_string(),
+            description: None,
+            location: None,
+            url: Some("https://example.com/\nBEGIN:VEVENT\r\nSUMMARY:evil".to_string()),
+            dtstart: Some(parse_ical_datetime("20240506T090000Z").unwrap()),
+            dtend: Some(parse_ical_datetime("20240506T100000Z").unwrap()),
+            all_day: false,
+            status: Some("CONFIRMED\nPWNED".to_string()),
+            recurrence: Some("FREQ=WEEKLY\r\nRRULE2:x".to_string()),
+        };
+
+        let ical = export_ical(&event);
+        // A crafted value must not be able to split the .ics into extra lines.
+        let lines: Vec<&str> = ical.lines().collect();
+        assert!(lines.contains(&"UID:badUIDsekret"));
+        assert!(lines.contains(&"STATUS:CONFIRMEDPWNED"));
+        assert!(lines.contains(&"URL:https://example.com/BEGIN:VEVENTSUMMARY:evil"));
+        assert!(lines.contains(&"RRULE:FREQ=WEEKLYRRULE2:x"));
+        // The VEVENT is opened and closed exactly once.
+        assert_eq!(ical.matches("END:VEVENT").count(), 1);
     }
 
     #[test]

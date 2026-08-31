@@ -306,6 +306,7 @@ mod tests {
             summary: summary.to_string(),
             description: None,
             location: None,
+            url: None,
             dtstart,
             dtend,
             all_day: false,
