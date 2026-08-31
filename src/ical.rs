@@ -106,14 +106,14 @@ pub(crate) fn parse_event(ical_event: &ical::parser::ical::component::IcalEvent)
             }
             "SUMMARY" => {
                 if let Some(value) = &property.value {
-                    summary = value.clone();
+                    summary = unescape_ical_text(value);
                 }
             }
             "DESCRIPTION" => {
-                description = property.value.clone();
+                description = property.value.as_deref().map(unescape_ical_text);
             }
             "LOCATION" => {
-                location = property.value.clone();
+                location = property.value.as_deref().map(unescape_ical_text);
             }
             "DTSTART" => {
                 if let Some(value) = &property.value {
@@ -216,10 +216,10 @@ pub fn export_ical(event: &CalendarEvent) -> String {
 
     // Optional text properties
     for (name, value) in [
-        ("SUMMARY", event.summary.as_str()),
-        ("DESCRIPTION", event.description.as_deref().unwrap_or("")),
-        ("LOCATION", event.location.as_deref().unwrap_or("")),
-        ("STATUS", event.status.as_deref().unwrap_or("")),
+        ("SUMMARY", escape_ical_text(event.summary.as_str())),
+        ("DESCRIPTION", escape_ical_text(event.description.as_deref().unwrap_or(""))),
+        ("LOCATION", escape_ical_text(event.location.as_deref().unwrap_or(""))),
+        ("STATUS", event.status.as_deref().unwrap_or("").to_string()),
     ] {
         if !value.is_empty() {
             out.push_str(&fold_line(&format!("{}:{}", name, value)));
@@ -237,7 +237,50 @@ pub fn export_ical(event: &CalendarEvent) -> String {
     out
 }
 
-/// Fold a content line to RFC 5545's 75-octet limit using CRLF + space.
+/// Escape a TEXT property value per RFC 5545: backslash, semicolon, comma
+    /// and line breaks. Carriage returns are treated as line breaks.
+    fn escape_ical_text(value: &str) -> String {
+        let value = value.replace("\r\n", "\n").replace('\r', "\n");
+        let mut out = String::with_capacity(value.len());
+        for ch in value.chars() {
+            match ch {
+                '\\' => out.push_str("\\\\"),
+                ';' => out.push_str("\\;"),
+                ',' => out.push_str("\\,"),
+                '\n' => out.push_str("\\n"),
+                other => out.push(other),
+            }
+        }
+        out
+    }
+
+    /// Undo the RFC 5545 TEXT escapes applied by a writer. The `ical` crate
+    /// leaves values escaped, so parsed TEXT fields must be unescaped before
+    /// they are stored or displayed.
+    fn unescape_ical_text(value: &str) -> String {
+        let mut out = String::with_capacity(value.len());
+        let mut chars = value.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\\' {
+                match chars.next() {
+                    Some('n') | Some('N') => out.push('\n'),
+                    Some('\\') => out.push('\\'),
+                    Some(';') => out.push(';'),
+                    Some(',') => out.push(','),
+                    Some(other) => {
+                        out.push('\\');
+                        out.push(other);
+                    }
+                    None => out.push('\\'),
+                }
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    /// Fold a content line to RFC 5545's 75-octet limit using CRLF + space.
 fn fold_line(line: &str) -> String {
     let mut result = String::new();
     let mut remaining = line;
@@ -305,6 +348,34 @@ mod tests {
         assert_eq!(back.recurrence.as_deref(), Some("FREQ=WEEKLY;COUNT=4"));
         assert_eq!(back.dtstart.unwrap(), dtstart);
         assert_eq!(back.dtend.unwrap(), dtend);
+    }
+
+    #[test]
+    fn test_export_escapes_special_characters() {
+        let event = CalendarEvent {
+            uid: "evt-escape@example.com".to_string(),
+            summary: "Lunch, pizza; with back\\slash".to_string(),
+            description: Some("Line one\nLine two".to_string()),
+            location: Some("Café 5; Room B".to_string()),
+            dtstart: Some(parse_ical_datetime("20240506T090000Z").unwrap()),
+            dtend: Some(parse_ical_datetime("20240506T100000Z").unwrap()),
+            all_day: false,
+            status: Some("CONFIRMED".to_string()),
+            recurrence: None,
+        };
+
+        let ical = export_ical(&event);
+        // Special characters must be escaped on the wire.
+        assert!(ical.contains("SUMMARY:Lunch\\, pizza\\; with back\\\\slash"));
+        assert!(ical.contains("DESCRIPTION:Line one\\nLine two"));
+        assert!(ical.contains("LOCATION:Café 5\\; Room B"));
+
+        // And the round-trip restores the original text exactly.
+        let reparsed = parse_ical_text(&ical).unwrap();
+        let back = &reparsed.events[0];
+        assert_eq!(back.summary, "Lunch, pizza; with back\\slash");
+        assert_eq!(back.description.as_deref(), Some("Line one\nLine two"));
+        assert_eq!(back.location.as_deref(), Some("Café 5; Room B"));
     }
 
     #[test]
