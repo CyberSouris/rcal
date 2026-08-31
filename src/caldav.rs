@@ -6,6 +6,7 @@ use url::Url;
 
 use crate::config::Config;
 use crate::db::Database;
+use crate::display;
 use crate::ical::parse_ical_text;
 
 pub const DAV_NS: &str = "DAV:";
@@ -250,7 +251,7 @@ impl CalDavClient {
                 "Request {} returned status {}: {}",
                 url,
                 status,
-                truncate(&text, 300)
+                display::sanitize(&truncate(&text, 300))
             );
         }
 
@@ -410,7 +411,7 @@ impl CalDavClient {
         let status = resp.status();
         if !status.is_success() {
             let text = self.read_body_limited(resp).await.unwrap_or_default();
-            bail!("PUT {} returned status {}: {}", url, status, truncate(&text, 300));
+            bail!("PUT {} returned status {}: {}", url, status, display::sanitize(&truncate(&text, 300)));
         }
 
         Ok(resp
@@ -590,7 +591,7 @@ fn calendar_collections_from(doc: &Document, base: &str) -> Option<Vec<RemoteCal
         let href = match resolve_href(base, &href) {
             Ok(h) => h,
             Err(e) => {
-                eprintln!("warning: {}", e);
+                eprintln!("warning: {}", display::sanitize(&e.to_string()));
                 continue;
             }
         };
