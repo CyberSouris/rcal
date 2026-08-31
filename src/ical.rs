@@ -25,8 +25,23 @@ pub struct Calendar {
     pub events: Vec<CalendarEvent>,
 }
 
+/// Hard cap on imported .ics file size; files larger than this are rejected
+/// instead of being read into memory.
+const MAX_ICAL_FILE_BYTES: usize = 64 * 1024 * 1024;
+
 /// Parse an iCal (.ics) file and return the calendar with events
 pub fn parse_ical_file(path: &Path) -> Result<Calendar> {
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("Failed to stat iCal file: {}", path.display()))?;
+    if metadata.len() > MAX_ICAL_FILE_BYTES as u64 {
+        anyhow::bail!(
+            "iCal file {} is {:.1} MiB, exceeding the {} MiB limit",
+            path.display(),
+            metadata.len() as f64 / (1024.0 * 1024.0),
+            MAX_ICAL_FILE_BYTES / (1024 * 1024),
+        );
+    }
+
     let file = File::open(path)
         .with_context(|| format!("Failed to open iCal file: {}", path.display()))?;
 

@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use futures_util::StreamExt;
 use roxmltree::{Document, Node};
 use std::collections::HashSet;
 use url::Url;
@@ -10,6 +11,8 @@ use crate::ical::parse_ical_text;
 pub const DAV_NS: &str = "DAV:";
 pub const CALDAV_NS: &str = "urn:ietf:params:xml:ns:caldav";
 pub const APPLE_NS: &str = "http://apple.com/ns/ical/";
+
+const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
 const PROPFIND_ROOT_BODY: &str = "<?xml version=\"1.0\" encoding=\"utf-8\" ?>
 <d:propfind xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\">
@@ -202,6 +205,25 @@ impl CalDavClient {
         .await
     }
 
+    /// Read a response body into a String, aborting if the server sends more
+    /// than [`MAX_RESPONSE_BYTES`]. A hostile or misbehaving server must not
+    /// be able to exhaust client memory.
+    async fn read_body_limited(&self, resp: reqwest::Response) -> Result<String> {
+        let mut body = String::new();
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("Failed to read response body chunk")?;
+            if body.len() + chunk.len() > MAX_RESPONSE_BYTES {
+                bail!(
+                    "Response body exceeds the {} MiB size limit",
+                    MAX_RESPONSE_BYTES / (1024 * 1024)
+                );
+            }
+            body.push_str(&String::from_utf8_lossy(&chunk));
+        }
+        Ok(body)
+    }
+
     async fn send_xml(
         &self,
         method: reqwest::Method,
@@ -221,7 +243,7 @@ impl CalDavClient {
             .with_context(|| format!("Request failed: {}", url))?;
 
         let status = resp.status();
-        let text = resp.text().await.context("Failed to read response body")?;
+        let text = self.read_body_limited(resp).await?;
 
         if !status.is_success() && status != reqwest::StatusCode::MULTI_STATUS {
             bail!(
@@ -387,7 +409,7 @@ impl CalDavClient {
 
         let status = resp.status();
         if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
+            let text = self.read_body_limited(resp).await.unwrap_or_default();
             bail!("PUT {} returned status {}: {}", url, status, truncate(&text, 300));
         }
 
