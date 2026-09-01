@@ -226,6 +226,19 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    #[test]
+    fn test_custom_default_view_roundtrips() {
+        let path = temp_config_path();
+        let mut config = Config::new("https://dav.example.com/", "alice", None);
+        config.display.default_view = "month".to_string();
+        config.write_to(&path).unwrap();
+
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.display.default_view, "month");
+
+        std::fs::remove_file(&path).ok();
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_config_written_owner_only() {

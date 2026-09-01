@@ -9,6 +9,14 @@ pub fn sanitize(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).collect()
 }
 
+/// Like [`sanitize`], but preserves newlines and tabs so multi-line text
+/// (e.g. event descriptions containing `\n`) keeps its line breaks.
+pub fn sanitize_multiline(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+        .collect()
+}
+
 /// Format a day view (like Today or Show <date>)
 pub fn render_day(events: &[CalendarEvent], date: NaiveDate) -> String {
     let today = Local::now().date_naive();
@@ -50,6 +58,91 @@ pub fn render_day(events: &[CalendarEvent], date: NaiveDate) -> String {
 
         if let Some(location) = &event.location {
             output.push_str(&format!("  {:<22}   at {}\n", "", sanitize(location)));
+        }
+    }
+
+    output
+}
+
+/// Format a day view where each event is expanded to its full details
+pub fn render_day_details(events: &[CalendarEvent], date: NaiveDate) -> String {
+    let today = Local::now().date_naive();
+    let is_today = date == today;
+
+    let mut output = String::new();
+
+    // Header
+    let title = if is_today {
+        format!("Today, {}", date.format("%A, %B %e, %Y"))
+    } else {
+        format!("{}", date.format("%A, %B %e, %Y"))
+    };
+
+    output.push_str(&format!("{}\n", title));
+    output.push_str(&"=".repeat(title.len()));
+    output.push_str("\n\n");
+
+    let mut day_events: Vec<&CalendarEvent> = events
+        .iter()
+        .filter(|e| event_on_date(e, date))
+        .collect();
+
+    day_events.sort_by(|a, b| a.dtstart.cmp(&b.dtstart));
+
+    if day_events.is_empty() {
+        output.push_str("No events today.\n");
+        return output;
+    }
+
+    for (i, event) in day_events.iter().enumerate() {
+        if i > 0 {
+            output.push_str("\n");
+        }
+        output.push_str(&render_event_details(event));
+    }
+    output.push_str("\n");
+
+    output
+}
+
+/// Render every field of a single event as a labelled block
+pub fn render_event_details(event: &CalendarEvent) -> String {
+    let mut output = String::new();
+
+    let status = event
+        .status
+        .as_deref()
+        .map(|s| format!(" [{}]", sanitize(s)))
+        .unwrap_or_default();
+    output.push_str(&format!("{}{}\n", sanitize(&event.summary), status));
+    output.push_str(&format!("{}\n", "-".repeat(40)));
+
+    output.push_str(&format!("Time:         {}\n", format_event_time(event)));
+
+    if let Some(location) = event.location.as_deref() {
+        if !location.is_empty() {
+            output.push_str(&format!("Location:     {}\n", sanitize(location)));
+        }
+    }
+    if let Some(url) = event.url.as_deref() {
+        if !url.is_empty() {
+            output.push_str(&format!("Link:         {}\n", sanitize(url)));
+        }
+    }
+    if let Some(description) = event.description.as_deref() {
+        if !description.is_empty() {
+            output.push_str(&format!(
+                "Description:  {}\n",
+                sanitize_multiline(description)
+            ));
+        }
+    }
+
+    output.push_str(&format!("UID:          {}\n", sanitize(&event.uid)));
+
+    if let Some(recurrence) = event.recurrence.as_deref() {
+        if !recurrence.is_empty() {
+            output.push_str(&format!("Recurrence:   {}\n", sanitize(recurrence)));
         }
     }
 
@@ -235,35 +328,46 @@ fn format_cell(day: u32, is_today: bool, count: Option<usize>) -> String {
     format!("{:<6} ", content)
 }
 
-/// Check if an event occurs on a given date
+/// Check if an event occurs on a given date.
+///
+/// Timed events are bucketed by their date in the user's local timezone;
+/// all-day events (stored at UTC midnight) by their stored date.
 fn event_on_date(event: &CalendarEvent, date: NaiveDate) -> bool {
-    match (event.dtstart, event.dtend) {
-        (Some(start), Some(end)) => {
-            let start_date = start.with_timezone(&Local).date_naive();
-            let end_date = end.with_timezone(&Local).date_naive();
-            if event.all_day {
-                // All-day: span includes end date
-                date >= start_date && date <= end_date
-            } else {
-                // Timed events: end date treated as exclusive
-                date >= start_date && date <= end_date
-            }
-        }
-        (Some(start), None) => {
-            let start_date = start.with_timezone(&Local).date_naive();
-            date >= start_date
-        }
-        _ => false,
+    let (Some(start), Some(end)) = (event.dtstart, event.dtend) else {
+        let Some(start) = event.dtstart else {
+            return false;
+        };
+        let start_date = if event.all_day {
+            start.date_naive()
+        } else {
+            start.with_timezone(&Local).date_naive()
+        };
+        return date >= start_date;
+    };
+    let start_date = if event.all_day {
+        start.date_naive()
+    } else {
+        start.with_timezone(&Local).date_naive()
+    };
+    let end_date = if event.all_day {
+        end.date_naive()
+    } else {
+        end.with_timezone(&Local).date_naive()
+    };
+    date >= start_date && date <= end_date
+}
+
+/// The date a user thinks of an event as occurring on.
+fn event_date(event: &CalendarEvent) -> Option<NaiveDate> {
+    match event.dtstart {
+        Some(start) if event.all_day => Some(start.date_naive()),
+        Some(start) => Some(start.with_timezone(&Local).date_naive()),
+        None => None,
     }
 }
 
-fn event_date(event: &CalendarEvent) -> Option<NaiveDate> {
-    event
-        .dtstart
-        .map(|dt| dt.with_timezone(&Local).date_naive())
-}
-
-/// Format an event's time range
+/// Format an event's time range in the user's local timezone (timed events
+/// only; all-day events stay bound to their stored dates).
 fn format_event_time(event: &CalendarEvent) -> String {
     match (&event.dtstart, &event.dtend) {
         (Some(start), Some(end)) => {
@@ -278,10 +382,12 @@ fn format_event_time(event: &CalendarEvent) -> String {
                     )
                 }
             } else {
+                let start = start.with_timezone(&Local);
+                let end = end.with_timezone(&Local);
                 format!(
                     "{} - {}",
-                    start.with_timezone(&Local).format("%H:%M"),
-                    end.with_timezone(&Local).format("%H:%M")
+                    start.format("%H:%M"),
+                    end.format("%H:%M")
                 )
             }
         }
@@ -299,7 +405,21 @@ fn format_event_time(event: &CalendarEvent) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{DateTime, TimeZone, Utc};
+    use chrono::{DateTime, Local, TimeZone, Utc};
+
+    /// An event at the given local wall-clock time (stored as the UTC
+    /// instant), so assertions on rendered times hold in any timezone.
+    fn local_event(
+        summary: &str,
+        start: DateTime<Local>,
+        end: DateTime<Local>,
+    ) -> CalendarEvent {
+        make_event(
+            summary,
+            Some(start.with_timezone(&Utc)),
+            Some(end.with_timezone(&Utc)),
+        )
+    }
 
     fn make_event(
         summary: &str,
@@ -320,18 +440,6 @@ mod tests {
         }
     }
 
-    fn local_event(
-        summary: &str,
-        start: DateTime<Local>,
-        end: DateTime<Local>,
-    ) -> CalendarEvent {
-        make_event(
-            summary,
-            Some(start.with_timezone(&Utc)),
-            Some(end.with_timezone(&Utc)),
-        )
-    }
-
     #[test]
     fn test_render_day_with_events() {
         let date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
@@ -340,9 +448,9 @@ mod tests {
         let events = vec![local_event("Meeting", start, end)];
 
         let output = render_day(&events, date);
+        assert!(output.contains("Meeting"));
         // The event is created at 09:00 local, so it renders as 09:00
         // regardless of the host timezone.
-        assert!(output.contains("Meeting"));
         assert!(output.contains("09:00"));
     }
 
@@ -378,10 +486,61 @@ mod tests {
     }
 
     #[test]
+    fn test_render_day_details() {
+        let date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let start = Local.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).single().unwrap();
+        let end = start + chrono::Duration::hours(1);
+        let mut event = local_event("Meeting", start, end);
+        event.description = Some("Agenda\nRound two".to_string());
+        event.location = Some("Room 1".to_string());
+        event.url = Some("https://example.com".to_string());
+        event.status = Some("CONFIRMED".to_string());
+        let events = vec![event];
+
+        let output = render_day_details(&events, date);
+        assert!(output.contains("Monday, January 15, 2024"));
+        assert!(output.contains("[CONFIRMED]"));
+        assert!(output.contains("09:00"));
+        // Description keeps its newlines in the details view.
+        assert!(output.contains("Agenda\nRound two"));
+        // Description newlines are not stripped by the ANSI sanitizer.
+        assert!(!output.contains("AgendaRound two"));
+        assert!(output.contains("Location:     Room 1"));
+        assert!(output.contains("Link:         https://example.com"));
+        assert!(output.contains("UID:          uid-Meeting"));
+    }
+
+    #[test]
+    fn test_render_event_details_empty_fields() {
+        let date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let start = Local.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).single().unwrap();
+        let end = start + chrono::Duration::hours(1);
+        let event = local_event("Standup", start, end);
+
+        let output = render_event_details(&event);
+        assert!(output.contains("Standup"));
+        assert!(output.contains("Time:"));
+        // Absent optional fields are simply skipped.
+        assert!(!output.contains("Location:"));
+        assert!(!output.contains("Link:"));
+        assert!(!output.contains("Description:"));
+        assert!(output.contains("UID:          uid-Standup"));
+        assert_eq!(output.lines().count(), 4);
+    }
+
+    #[test]
     fn test_sanitize_strips_control_chars_and_ansi() {
         let input = "Standup\x1b[31mRED\x1b[0m\x07\x1b]0;title\x1btail";
         assert_eq!(sanitize(input), "Standup[31mRED[0m]0;titletail");
         assert_eq!(sanitize("meeting\nroom"), "meetingroom");
         assert_eq!(sanitize("plain meeting"), "plain meeting");
+    }
+
+    #[test]
+    fn test_sanitize_multiline_preserves_newlines() {
+        let input = "line one\nline two\x1b[31mRED\x1b[0m";
+        assert_eq!(sanitize_multiline(input), "line one\nline two[31mRED[0m");
+        assert_eq!(sanitize_multiline("tab\there\n"), "tab\there\n");
+        assert_eq!(sanitize_multiline("plain"), "plain");
     }
 }

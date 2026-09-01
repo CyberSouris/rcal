@@ -17,13 +17,19 @@ use std::path::PathBuf;
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    /// Subcommand; when omitted, the default view from the config
+    /// ([display] default_view) is shown.
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
     /// Show today's events
-    Today,
+    Today {
+        /// Show all details of each event
+        #[arg(long)]
+        details: bool,
+    },
 
     /// Show this week's overview
     Week {
@@ -39,10 +45,14 @@ enum Commands {
         month: Option<String>,
     },
 
-    /// Show events for a specific date
+    /// Show events for a specific date (or a single event's details at a time)
     Show {
-        /// Date to show (YYYY-MM-DD)
+        /// Date to show (YYYY-MM-DD, or YYYY-MM-DD@HH:MM for one event)
         date: String,
+
+        /// Show all details of each event
+        #[arg(long)]
+        details: bool,
     },
 
     /// Import iCal (.ics) file
@@ -139,43 +149,19 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Today => {
-            let db = db::Database::open()?;
-            let events = db.get_events_for_day(Local::now().date_naive())?;
-            print!("{}", display::render_day(&events, Local::now().date_naive()));
-        }
-        Commands::Week { date } => {
-            let db = db::Database::open()?;
-            let start = match date {
-                Some(d) => parse_date(&d)?,
-                None => Local::now().date_naive(),
-            };
-            let all = db.get_all_events(None, None)?;
-            print!("{}", display::render_week(&all, start));
-        }
-        Commands::Month { month } => {
-            let db = db::Database::open()?;
-            let month_date = match month {
-                Some(m) => parse_month(&m)?,
-                None => Local::now().date_naive(),
-            };
-            let all = db.get_all_events(None, None)?;
-            print!("{}", display::render_month(&all, month_date));
-        }
-        Commands::Show { date } => {
-            let db = db::Database::open()?;
+        Some(Commands::Today { details }) => show_day(Local::now().date_naive(), details),
+        Some(Commands::Week { date }) => show_week(date),
+        Some(Commands::Month { month }) => show_month(month),
+        Some(Commands::Show { date, details }) => {
             let date = parse_date(&date)?;
-            let events = db.get_events_for_day(date)?;
-            print!("{}", display::render_day(&events, date));
+            show_day(date, details)
         }
-        Commands::Import {
+        Some(Commands::Import {
             file,
             add,
             dry_run,
-        } => {
-            handle_import(&file, add, dry_run)?;
-        }
-        Commands::Sync => {
+        }) => handle_import(&file, add, dry_run),
+        Some(Commands::Sync) => {
             let config = config::Config::load()?;
             let client = caldav::CalDavClient::new(&config)?;
 
@@ -220,8 +206,9 @@ async fn main() -> anyhow::Result<()> {
                 total,
                 summary.calendars.len(),
             );
+            Ok(())
         }
-        Commands::New {
+        Some(Commands::New {
             title,
             date,
             time,
@@ -230,7 +217,7 @@ async fn main() -> anyhow::Result<()> {
             location,
             description,
             calendar,
-        } => {
+        }) => {
             handle_new(
                 title,
                 date,
@@ -240,9 +227,9 @@ async fn main() -> anyhow::Result<()> {
                 location,
                 description,
                 calendar,
-            )?;
+            )
         }
-        Commands::Search { query, from, to } => {
+        Some(Commands::Search { query, from, to }) => {
             let db = db::Database::open()?;
 
             let from_dt = match from {
@@ -285,8 +272,9 @@ async fn main() -> anyhow::Result<()> {
                     println!("  {:<28} {}", time_str, display::sanitize(&event.summary));
                 }
             }
+            Ok(())
         }
-        Commands::Calendars => {
+        Some(Commands::Calendars) => {
             let db = db::Database::open()?;
             let calendars = db.get_calendars()?;
             if calendars.is_empty() {
@@ -301,18 +289,70 @@ async fn main() -> anyhow::Result<()> {
                     );
                 }
             }
+            Ok(())
         }
-        Commands::Init {
+        Some(Commands::Init {
             url,
             username,
             password_command,
             force,
-        } => {
-            handle_init(url, username, password_command, force)?;
-        }
+        }) => handle_init(url, username, password_command, force),
+        None => run_default_view(),
     }
+}
 
+/// Show the day view for `date`, optionally with full event details
+fn show_day(date: NaiveDate, details: bool) -> anyhow::Result<()> {
+    let db = db::Database::open()?;
+    let events = db.get_events_for_day(date)?;
+    if details {
+        print!("{}", display::render_day_details(&events, date));
+    } else {
+        print!("{}", display::render_day(&events, date));
+    }
     Ok(())
+}
+
+/// Show the week view starting on (or containing) `date`
+fn show_week(date: Option<String>) -> anyhow::Result<()> {
+    let db = db::Database::open()?;
+    let start = match date {
+        Some(d) => parse_date(&d)?,
+        None => Local::now().date_naive(),
+    };
+    let all = db.get_all_events(None, None)?;
+    print!("{}", display::render_week(&all, start));
+    Ok(())
+}
+
+/// Show the month view for `month`
+fn show_month(month: Option<String>) -> anyhow::Result<()> {
+    let db = db::Database::open()?;
+    let month_date = match month {
+        Some(m) => parse_month(&m)?,
+        None => Local::now().date_naive(),
+    };
+    let all = db.get_all_events(None, None)?;
+    print!("{}", display::render_month(&all, month_date));
+    Ok(())
+}
+
+/// Handle `rcal` invoked without a subcommand: show the default view
+/// configured in `[display] default_view` (today if no config file exists).
+fn run_default_view() -> anyhow::Result<()> {
+    let default_view = config::Config::load()
+        .map(|c| c.display.default_view)
+        .unwrap_or_else(|_| "today".to_string());
+
+    match default_view.as_str() {
+        "today" => show_day(Local::now().date_naive(), false),
+        "week" => show_week(None),
+        "month" => show_month(None),
+        other => anyhow::bail!(
+            "Invalid default_view '{}' in config; expected one of: today, week, month.",
+            other
+        ),
+    }
 }
 
 /// Handle the import command: parse, check duplicates/conflicts, add to database
