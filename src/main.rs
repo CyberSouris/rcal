@@ -391,6 +391,19 @@ fn handle_import(file: &std::path::Path, add: bool, dry_run: bool) -> anyhow::Re
             time_str
         );
 
+        // Show the description and meeting link so the user can review them
+        // before deciding whether to import.
+        if let Some(description) = &event.description {
+            if !description.is_empty() {
+                println!("   Description: {}", display::sanitize_multiline(description));
+            }
+        }
+        if let Some(url) = &event.url {
+            if !url.is_empty() {
+                println!("   Link: {}", display::sanitize(url));
+            }
+        }
+
         // Check for duplicate
         let exists = db.event_exists(&event.uid)?;
         if exists {
