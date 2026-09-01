@@ -582,10 +582,7 @@ fn handle_new(
 
         let start = date.and_time(time);
         let end = start + duration;
-        (
-            chrono::TimeZone::from_utc_datetime(&chrono::Utc, &start),
-            chrono::TimeZone::from_utc_datetime(&chrono::Utc, &end),
-        )
+        (naive_local_to_utc(start), naive_local_to_utc(end))
     };
 
     let location = match location_flag {
@@ -749,13 +746,37 @@ fn parse_time(s: &str) -> anyhow::Result<chrono::NaiveTime> {
         .ok_or_else(|| anyhow::anyhow!("Invalid time: {} (expected HH:MM, 00-23:00-59)", s))
 }
 
+/// Interpret a naive datetime that the user typed (i.e. a local wall-clock
+/// time) as a UTC instant. Naive fallback handles DST transitions.
+fn naive_local_to_utc(naive: chrono::NaiveDateTime) -> chrono::DateTime<chrono::Utc> {
+    use chrono::{Local, LocalResult, TimeZone};
+    match Local.from_local_datetime(&naive) {
+        LocalResult::Single(dt) => dt.with_timezone(&chrono::Utc),
+        LocalResult::Ambiguous(dt, _) => dt.with_timezone(&chrono::Utc),
+        LocalResult::None => {
+            let probe = naive + chrono::Duration::hours(1);
+            Local
+                .from_local_datetime(&probe)
+                .earliest()
+                .map(|dt| dt.with_timezone(&chrono::Utc) - chrono::Duration::hours(1))
+                .unwrap_or_else(|| chrono::Utc.from_local_datetime(&naive).single().unwrap())
+        }
+    }
+}
+
 /// Format event time for import preview
 fn format_event_time(event: &ical::CalendarEvent) -> String {
     match (&event.dtstart, &event.dtend) {
         (Some(start), Some(end)) => {
             if event.all_day {
-                format!("All day ({} to {})", start.format("%Y-%m-%d"), end.format("%Y-%m-%d"))
+                format!(
+                    "All day ({} to {})",
+                    start.format("%Y-%m-%d"),
+                    end.format("%Y-%m-%d")
+                )
             } else {
+                let start = start.with_timezone(&Local);
+                let end = end.with_timezone(&Local);
                 format!(
                     "{} to {}",
                     start.format("%Y-%m-%d %H:%M"),
@@ -767,7 +788,7 @@ fn format_event_time(event: &ical::CalendarEvent) -> String {
             if event.all_day {
                 format!("All day ({})", start.format("%Y-%m-%d"))
             } else {
-                format!("{}", start.format("%Y-%m-%d %H:%M"))
+                format!("{}", start.with_timezone(&Local).format("%Y-%m-%d %H:%M"))
             }
         }
         _ => "No time".to_string(),

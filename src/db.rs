@@ -549,10 +549,14 @@ pub struct Calendar {
 impl Database {
     /// Load all events for a specific day
     pub fn get_events_for_day(&self, date: chrono::NaiveDate) -> Result<Vec<CalendarEvent>> {
-        let start = Utc
+        // The day's window is the user's local midnight spanning 24 hours,
+        // converted to UTC so timed events stored as UTC instants match the
+        // local calendar day.
+        let start = chrono::Local
             .with_ymd_and_hms(date.year(), date.month(), date.day(), 0, 0, 0)
             .single()
-            .unwrap();
+            .unwrap()
+            .with_timezone(&Utc);
         let end = start + chrono::Duration::days(1);
 
         self.get_events_in_range(start, end)
@@ -617,15 +621,35 @@ mod tests {
     #[test]
     fn test_get_events_for_day() {
         let db = test_db();
+        // Events are stored as UTC instants; build them from local wall-clock
+        // times so the local-day window contains the right one on any host.
+        let morning = chrono::Local
+            .with_ymd_and_hms(2024, 1, 15, 9, 0, 0)
+            .single()
+            .unwrap();
+        let next_day = chrono::Local
+            .with_ymd_and_hms(2024, 1, 16, 9, 0, 0)
+            .single()
+            .unwrap();
         db.insert_event(
-            &event("uid-1", "Morning", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0)),
+            &event(
+                "uid-1",
+                "Morning",
+                morning.with_timezone(&Utc),
+                (morning + chrono::Duration::hours(1)).with_timezone(&Utc),
+            ),
             None,
             None,
             None,
         )
         .unwrap();
         db.insert_event(
-            &event("uid-2", "Next Day", dt(2024, 1, 16, 9, 0), dt(2024, 1, 16, 10, 0)),
+            &event(
+                "uid-2",
+                "Next Day",
+                next_day.with_timezone(&Utc),
+                (next_day + chrono::Duration::hours(1)).with_timezone(&Utc),
+            ),
             None,
             None,
             None,

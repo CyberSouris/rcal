@@ -176,8 +176,7 @@ pub fn render_month(events: &[CalendarEvent], month: NaiveDate) -> String {
     // Group events by day for markers
     let mut events_by_day: HashMap<u32, usize> = HashMap::new();
     for event in events {
-        if let Some(start) = event.dtstart {
-            let event_date = start.date_naive();
+        if let Some(event_date) = event_date(event) {
             if event_date.year() == year && event_date.month() == month_num {
                 *events_by_day.entry(event_date.day()).or_insert(0) += 1;
             }
@@ -240,8 +239,8 @@ fn format_cell(day: u32, is_today: bool, count: Option<usize>) -> String {
 fn event_on_date(event: &CalendarEvent, date: NaiveDate) -> bool {
     match (event.dtstart, event.dtend) {
         (Some(start), Some(end)) => {
-            let start_date = start.date_naive();
-            let end_date = end.date_naive();
+            let start_date = start.with_timezone(&Local).date_naive();
+            let end_date = end.with_timezone(&Local).date_naive();
             if event.all_day {
                 // All-day: span includes end date
                 date >= start_date && date <= end_date
@@ -251,11 +250,17 @@ fn event_on_date(event: &CalendarEvent, date: NaiveDate) -> bool {
             }
         }
         (Some(start), None) => {
-            let start_date = start.date_naive();
+            let start_date = start.with_timezone(&Local).date_naive();
             date >= start_date
         }
         _ => false,
     }
+}
+
+fn event_date(event: &CalendarEvent) -> Option<NaiveDate> {
+    event
+        .dtstart
+        .map(|dt| dt.with_timezone(&Local).date_naive())
 }
 
 /// Format an event's time range
@@ -275,8 +280,8 @@ fn format_event_time(event: &CalendarEvent) -> String {
             } else {
                 format!(
                     "{} - {}",
-                    start.format("%H:%M"),
-                    end.format("%H:%M")
+                    start.with_timezone(&Local).format("%H:%M"),
+                    end.with_timezone(&Local).format("%H:%M")
                 )
             }
         }
@@ -284,7 +289,7 @@ fn format_event_time(event: &CalendarEvent) -> String {
             if event.all_day {
                 "All day".to_string()
             } else {
-                format!("{}", start.format("%H:%M"))
+                format!("{}", start.with_timezone(&Local).format("%H:%M"))
             }
         }
         _ => "No time".to_string(),
@@ -315,14 +320,28 @@ mod tests {
         }
     }
 
+    fn local_event(
+        summary: &str,
+        start: DateTime<Local>,
+        end: DateTime<Local>,
+    ) -> CalendarEvent {
+        make_event(
+            summary,
+            Some(start.with_timezone(&Utc)),
+            Some(end.with_timezone(&Utc)),
+        )
+    }
+
     #[test]
     fn test_render_day_with_events() {
         let date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
-        let start = Utc.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).unwrap();
-        let end = Utc.with_ymd_and_hms(2024, 1, 15, 10, 0, 0).unwrap();
-        let events = vec![make_event("Meeting", Some(start), Some(end))];
+        let start = Local.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).single().unwrap();
+        let end = start + chrono::Duration::hours(1);
+        let events = vec![local_event("Meeting", start, end)];
 
         let output = render_day(&events, date);
+        // The event is created at 09:00 local, so it renders as 09:00
+        // regardless of the host timezone.
         assert!(output.contains("Meeting"));
         assert!(output.contains("09:00"));
     }
@@ -337,9 +356,9 @@ mod tests {
     #[test]
     fn test_render_week() {
         let monday = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
-        let start = Utc.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).unwrap();
-        let end = Utc.with_ymd_and_hms(2024, 1, 15, 10, 0, 0).unwrap();
-        let events = vec![make_event("Meeting", Some(start), Some(end))];
+        let start = Local.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).single().unwrap();
+        let end = start + chrono::Duration::hours(1);
+        let events = vec![local_event("Meeting", start, end)];
 
         let output = render_week(&events, monday);
         assert!(output.contains("Week 3"));
@@ -349,9 +368,9 @@ mod tests {
     #[test]
     fn test_render_month() {
         let month = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        let start = Utc.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).unwrap();
-        let end = Utc.with_ymd_and_hms(2024, 1, 15, 10, 0, 0).unwrap();
-        let events = vec![make_event("Meeting", Some(start), Some(end))];
+        let start = Local.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).single().unwrap();
+        let end = start + chrono::Duration::hours(1);
+        let events = vec![local_event("Meeting", start, end)];
 
         let output = render_month(&events, month);
         assert!(output.contains("January"));
