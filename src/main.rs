@@ -4,7 +4,7 @@ mod db;
 mod display;
 mod ical;
 
-use chrono::{Local, NaiveDate};
+use chrono::{Local, NaiveDate, NaiveTime};
 use clap::{Parser, Subcommand};
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -149,12 +149,12 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Today { details }) => show_day(Local::now().date_naive(), details),
+        Some(Commands::Today { details }) => show_day(Local::now().date_naive(), None, details),
         Some(Commands::Week { date }) => show_week(date),
         Some(Commands::Month { month }) => show_month(month),
         Some(Commands::Show { date, details }) => {
-            let date = parse_date(&date)?;
-            show_day(date, details)
+            let (date, time) = parse_show_arg(&date)?;
+            show_day(date, time, details)
         }
         Some(Commands::Import {
             file,
@@ -301,16 +301,48 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// Show the day view for `date`, optionally with full event details
-fn show_day(date: NaiveDate, details: bool) -> anyhow::Result<()> {
+/// Show the day view for `date`, optionally with full event details.
+///
+/// If `time` is given, only the single event whose schedule is closest to
+/// `time` is shown, rendered with full details.
+fn show_day(date: NaiveDate, time: Option<NaiveTime>, details: bool) -> anyhow::Result<()> {
     let db = db::Database::open()?;
     let events = db.get_events_for_day(date)?;
+    if let Some(time) = time {
+        let event = find_event_at_time(&events, time)
+            .ok_or_else(|| anyhow::anyhow!("No event found at {} on {}", time, date))?;
+        print!("{}", display::render_event_details(event));
+        return Ok(());
+    }
     if details {
         print!("{}", display::render_day_details(&events, date));
     } else {
         print!("{}", display::render_day(&events, date));
     }
     Ok(())
+}
+
+/// Find the single event that is active at `time` (or, if none is running,
+/// the event starting nearest to `time`). All-day events have no time of day
+/// and are never matched.
+fn find_event_at_time(events: &[ical::CalendarEvent], time: NaiveTime) -> Option<&ical::CalendarEvent> {
+    let candidates: Vec<(NaiveTime, &ical::CalendarEvent)> = events
+        .iter()
+        .filter(|e| !e.all_day)
+        .filter_map(|e| {
+            let start = e.dtstart?;
+            Some((start.with_timezone(&Local).time(), e))
+        })
+        .collect();
+
+    // Prefer the most recently started event that is running at `time`;
+    // otherwise fall back to the earliest event starting after `time`.
+    candidates
+        .iter()
+        .filter(|(local, _)| *local <= time)
+        .max_by_key(|(local, _)| *local)
+        .or_else(|| candidates.iter().min_by_key(|(local, _)| *local))
+        .map(|(_, e)| *e)
 }
 
 /// Show the week view starting on (or containing) `date`
@@ -345,13 +377,28 @@ fn run_default_view() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "today".to_string());
 
     match default_view.as_str() {
-        "today" => show_day(Local::now().date_naive(), false),
+        "today" => show_day(Local::now().date_naive(), None, false),
         "week" => show_week(None),
         "month" => show_month(None),
         other => anyhow::bail!(
             "Invalid default_view '{}' in config; expected one of: today, week, month.",
             other
         ),
+    }
+}
+
+/// Parse the `show` date argument which may be `YYYY-MM-DD` or `YYYY-MM-DD@HH:MM`.
+fn parse_show_arg(s: &str) -> anyhow::Result<(NaiveDate, Option<NaiveTime>)> {
+    match s.split_once('@') {
+        Some((date_str, time_str)) => {
+            let date = parse_date(date_str)?;
+            let time = parse_time(time_str)?;
+            Ok((date, Some(time)))
+        }
+        None => {
+            let date = parse_date(s)?;
+            Ok((date, None))
+        }
     }
 }
 
