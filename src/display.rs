@@ -117,32 +117,34 @@ pub fn render_event_details(event: &CalendarEvent) -> String {
     output.push_str(&format!("{}{}\n", sanitize(&event.summary), status));
     output.push_str(&format!("{}\n", "-".repeat(40)));
 
-    output.push_str(&format!("Time:         {}\n", format_event_time(event)));
+    output.push_str(&format!("  Time:         {}\n", format_event_time(event)));
 
     if let Some(location) = event.location.as_deref() {
         if !location.is_empty() {
-            output.push_str(&format!("Location:     {}\n", sanitize(location)));
+            output.push_str(&format!("  Location:     {}\n", sanitize(location)));
         }
     }
     if let Some(url) = event.url.as_deref() {
         if !url.is_empty() {
-            output.push_str(&format!("Link:         {}\n", sanitize(url)));
-        }
-    }
-    if let Some(description) = event.description.as_deref() {
-        if !description.is_empty() {
-            output.push_str(&format!(
-                "Description:  {}\n",
-                sanitize_multiline(description)
-            ));
+            output.push_str(&format!("  Link:         {}\n", sanitize(url)));
         }
     }
 
-    output.push_str(&format!("UID:          {}\n", sanitize(&event.uid)));
+    output.push_str(&format!("  UID:          {}\n", sanitize(&event.uid)));
 
     if let Some(recurrence) = event.recurrence.as_deref() {
         if !recurrence.is_empty() {
-            output.push_str(&format!("Recurrence:   {}\n", sanitize(recurrence)));
+            output.push_str(&format!("  Recurrence:   {}\n", sanitize(recurrence)));
+        }
+    }
+
+    if let Some(description) = event.description.as_deref() {
+        if !description.is_empty() {
+            let indented: String = description
+                .lines()
+                .map(|l| if l.is_empty() { "\n".to_string() } else { format!("      {}\n", l) })
+                .collect();
+            output.push_str(&format!("\n  Description:\n{}", indented));
         }
     }
 
@@ -501,13 +503,15 @@ mod tests {
         assert!(output.contains("Monday, January 15, 2024"));
         assert!(output.contains("[CONFIRMED]"));
         assert!(output.contains("09:00"));
-        // Description keeps its newlines in the details view.
-        assert!(output.contains("Agenda\nRound two"));
+        // Description is rendered last, indented, on its own lines.
+        assert!(output.contains("Description:"));
+        assert!(output.contains("      Agenda"));
+        assert!(output.contains("      Round two"));
         // Description newlines are not stripped by the ANSI sanitizer.
         assert!(!output.contains("AgendaRound two"));
-        assert!(output.contains("Location:     Room 1"));
-        assert!(output.contains("Link:         https://example.com"));
-        assert!(output.contains("UID:          uid-Meeting"));
+        assert!(output.contains("  Location:     Room 1"));
+        assert!(output.contains("  Link:         https://example.com"));
+        assert!(output.contains("  UID:          uid-Meeting"));
     }
 
     #[test]
@@ -519,12 +523,12 @@ mod tests {
 
         let output = render_event_details(&event);
         assert!(output.contains("Standup"));
-        assert!(output.contains("Time:"));
+        assert!(output.contains("  Time:"));
         // Absent optional fields are simply skipped.
-        assert!(!output.contains("Location:"));
-        assert!(!output.contains("Link:"));
+        assert!(!output.contains("  Location:"));
+        assert!(!output.contains("  Link:"));
         assert!(!output.contains("Description:"));
-        assert!(output.contains("UID:          uid-Standup"));
+        assert!(output.contains("  UID:          uid-Standup"));
         assert_eq!(output.lines().count(), 4);
     }
 
