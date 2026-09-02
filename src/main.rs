@@ -404,8 +404,16 @@ fn parse_show_arg(s: &str) -> anyhow::Result<(NaiveDate, Option<NaiveTime>)> {
 
 /// Handle the import command: parse, check duplicates/conflicts, add to database
 fn handle_import(file: &std::path::Path, add: bool, dry_run: bool) -> anyhow::Result<()> {
+    use std::io::IsTerminal;
+    let interactive = std::io::stdin().is_terminal() && !add;
+
     let calendar = ical::parse_ical_file(file)?;
     let db = db::Database::open()?;
+
+    if interactive {
+        // Clear screen before presenting the import preview.
+        print!("\x1b[2J\x1b[H");
+    }
 
     println!(
         "Parsed calendar: {}",
