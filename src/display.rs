@@ -227,22 +227,50 @@ pub fn render_week(events: &[CalendarEvent], start_date: NaiveDate, agenda: bool
         .collect();
     placed.sort_by_key(|p| p.event.dtstart);
 
-    // Assign each event to the first grid row that is free on every day the
-    // event spans, so distinct events on the same day never share a row.
+    // Assign each event to a grid row. Same-day events never share a row, and
+    // at least one empty row is left between same-day events that do not
+    // follow each other (i.e. the previous one ends before the next one
+    // starts). Events on different days only share a row when they start at
+    // the same time.
     let mut rows: Vec<Vec<Option<usize>>> = Vec::new();
+    let mut last_on_day = [None; 7]; // most recently placed event per day
     for (idx, p) in placed.iter().enumerate() {
-        let mut row = 0;
+        let start = p.event.dtstart;
+        let mut min_row = 0;
+        for d in p.first_day..=p.last_day {
+            if let Some(prev) = last_on_day[d] {
+                let prev_row = rows
+                    .iter()
+                    .position(|r| r[d] == Some(prev))
+                    .unwrap_or(0);
+                let gap = match (placed[prev].event.dtend, start) {
+                    (Some(prev_end), Some(s)) => s > prev_end,
+                    _ => false,
+                };
+                min_row = min_row.max(if gap { prev_row + 2 } else { prev_row + 1 });
+            }
+        }
+        // Prefer a row that already holds events starting at the same time.
+        let mut row = (min_row..rows.len())
+            .find(|&r| rows[r].iter().flatten().any(|&i| placed[i].event.dtstart == start))
+            .unwrap_or(min_row);
         loop {
-            if rows.len() == row {
+            while rows.len() <= row {
                 rows.push(vec![None; 7]);
             }
-            if (p.first_day..=p.last_day).all(|d| rows[row][d].is_none()) {
+            let free = (p.first_day..=p.last_day).all(|d| rows[row][d].is_none());
+            let same_start = rows[row]
+                .iter()
+                .flatten()
+                .all(|&i| placed[i].event.dtstart == start);
+            if free && same_start {
                 break;
             }
             row += 1;
         }
         for d in p.first_day..=p.last_day {
             rows[row][d] = Some(idx);
+            last_on_day[d] = Some(idx);
         }
     }
 
@@ -687,6 +715,93 @@ mod tests {
         assert!(output.contains("Architecture"));
         // At most three lines, the last one marked with an ellipsis.
         assert!(output.contains("…"));
+    }
+
+    #[test]
+    fn test_render_week_gap_inserts_empty_row() {
+        let monday = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let start1 = Local.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).single().unwrap();
+        let end1 = start1 + chrono::Duration::hours(1);
+        // 10:30 -> 14:00 leaves a gap after the morning event.
+        let start2 = Local.with_ymd_and_hms(2024, 1, 15, 14, 0, 0).single().unwrap();
+        let end2 = start2 + chrono::Duration::hours(1);
+        let events = vec![
+            local_event("Standup", start1, end1),
+            local_event("Review", start2, end2),
+        ];
+
+        let output = render_week(&events, monday, false);
+        let lines: Vec<&str> = output.lines().collect();
+        let i1 = lines.iter().position(|l| l.contains("Standup")).unwrap();
+        let i2 = lines.iter().position(|l| l.contains("Review")).unwrap();
+        // Events not following each other are separated by an empty row
+        // (event row + rule + empty row + rule between them).
+        assert!(
+            i2 - i1 >= 4,
+            "expected a gap row between non-consecutive events ({} vs {})",
+            i1,
+            i2
+        );
+    }
+
+    #[test]
+    fn test_render_week_consecutive_events_are_adjacent() {
+        let monday = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let start1 = Local.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).single().unwrap();
+        let end1 = start1 + chrono::Duration::hours(1);
+        // 10:00 follows the 09:00-10:00 event directly.
+        let start2 = Local.with_ymd_and_hms(2024, 1, 15, 10, 0, 0).single().unwrap();
+        let end2 = start2 + chrono::Duration::hours(1);
+        let events = vec![
+            local_event("Standup", start1, end1),
+            local_event("Brief", start2, end2),
+        ];
+
+        let output = render_week(&events, monday, false);
+        let lines: Vec<&str> = output.lines().collect();
+        let i1 = lines.iter().position(|l| l.contains("Standup")).unwrap();
+        let i2 = lines.iter().position(|l| l.contains("Brief")).unwrap();
+        // Consecutive events share no empty row between them (row + rule).
+        assert_eq!(i2 - i1, 2);
+    }
+
+    #[test]
+    fn test_render_week_overlapping_events_are_not_gapped() {
+        let monday = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let start1 = Local.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).single().unwrap();
+        let end1 = start1 + chrono::Duration::hours(2);
+        let start2 = Local.with_ymd_and_hms(2024, 1, 15, 10, 0, 0).single().unwrap();
+        let end2 = start2 + chrono::Duration::hours(1);
+        let events = vec![
+            local_event("LongCall", start1, end1),
+            local_event("Brief", start2, end2),
+        ];
+
+        let output = render_week(&events, monday, false);
+        let lines: Vec<&str> = output.lines().collect();
+        let i1 = lines.iter().position(|l| l.contains("LongCall")).unwrap();
+        let i2 = lines.iter().position(|l| l.contains("Brief")).unwrap();
+        assert_eq!(i2 - i1, 2);
+    }
+
+    #[test]
+    fn test_render_week_cross_day_events_do_not_share_rows() {
+        let monday = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let start1 = Local.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).single().unwrap();
+        let end1 = start1 + chrono::Duration::hours(1);
+        let start2 = Local.with_ymd_and_hms(2024, 1, 17, 9, 0, 0).single().unwrap();
+        let end2 = start2 + chrono::Duration::hours(1);
+        let events = vec![
+            local_event("Monday", start1, end1),
+            local_event("Wednesday", start2, end2),
+        ];
+
+        let output = render_week(&events, monday, false);
+        let lines: Vec<&str> = output.lines().collect();
+        let i1 = lines.iter().position(|l| l.contains("Monday")).unwrap();
+        let i2 = lines.iter().position(|l| l.contains("Wednesday")).unwrap();
+        // Different days with different start times must not share a row.
+        assert_ne!(i1, i2);
     }
 
     #[test]
