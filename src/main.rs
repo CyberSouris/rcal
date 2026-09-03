@@ -4,7 +4,7 @@ mod db;
 mod display;
 mod ical;
 
-use chrono::{Local, NaiveDate, NaiveTime};
+use chrono::{Days, Local, Months, NaiveDate, NaiveTime};
 use clap::{Parser, Subcommand};
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -29,6 +29,10 @@ enum Commands {
         /// Show all details of each event
         #[arg(long)]
         details: bool,
+
+        /// Show the next day instead of today
+        #[arg(long)]
+        next: bool,
     },
 
     /// Show this week's overview
@@ -36,6 +40,14 @@ enum Commands {
         /// Start date (YYYY-MM-DD), defaults to Monday of current week
         #[arg(short, long)]
         date: Option<String>,
+
+        /// Show the next week
+        #[arg(long)]
+        next: bool,
+
+        /// Show the full day-by-day listing below the grid
+        #[arg(long, visible_alias = "details")]
+        agenda: bool,
     },
 
     /// Show this month's overview
@@ -43,6 +55,10 @@ enum Commands {
         /// Month (YYYY-MM), defaults to current month
         #[arg(short, long)]
         month: Option<String>,
+
+        /// Show the next month
+        #[arg(long)]
+        next: bool,
     },
 
     /// Show events for a specific date (or a single event's details at a time)
@@ -149,9 +165,13 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Today { details }) => show_day(Local::now().date_naive(), None, details),
-        Some(Commands::Week { date }) => show_week(date),
-        Some(Commands::Month { month }) => show_month(month),
+        Some(Commands::Today { details, next }) => {
+            let date = Local::now().date_naive();
+            let date = if next { date + Days::new(1) } else { date };
+            show_day(date, None, details)
+        }
+        Some(Commands::Week { date, next, agenda }) => show_week(date, next, agenda),
+        Some(Commands::Month { month, next }) => show_month(month, next),
         Some(Commands::Show { date, details }) => {
             let (date, time) = parse_show_arg(&date)?;
             show_day(date, time, details)
@@ -345,24 +365,33 @@ fn find_event_at_time(events: &[ical::CalendarEvent], time: NaiveTime) -> Option
         .map(|(_, e)| *e)
 }
 
-/// Show the week view starting on (or containing) `date`
-fn show_week(date: Option<String>) -> anyhow::Result<()> {
+/// Show the week view starting on (or containing) `date`. When `next` is
+/// set, the week after `date` is shown. When `agenda` is set, the full
+/// day-by-day listing is appended below the event grid.
+fn show_week(date: Option<String>, next: bool, agenda: bool) -> anyhow::Result<()> {
     let db = db::Database::open()?;
     let start = match date {
         Some(d) => parse_date(&d)?,
         None => Local::now().date_naive(),
     };
+    let start = if next { start + Days::new(7) } else { start };
     let all = db.get_all_events(None, None)?;
-    print!("{}", display::render_week(&all, start));
+    print!("{}", display::render_week(&all, start, agenda));
     Ok(())
 }
 
-/// Show the month view for `month`
-fn show_month(month: Option<String>) -> anyhow::Result<()> {
+/// Show the month view for `month`. When `next` is set, the month after
+/// `month` is shown.
+fn show_month(month: Option<String>, next: bool) -> anyhow::Result<()> {
     let db = db::Database::open()?;
     let month_date = match month {
         Some(m) => parse_month(&m)?,
         None => Local::now().date_naive(),
+    };
+    let month_date = if next {
+        month_date + Months::new(1)
+    } else {
+        month_date
     };
     let all = db.get_all_events(None, None)?;
     print!("{}", display::render_month(&all, month_date));
@@ -378,8 +407,8 @@ fn run_default_view() -> anyhow::Result<()> {
 
     match default_view.as_str() {
         "today" => show_day(Local::now().date_naive(), None, false),
-        "week" => show_week(None),
-        "month" => show_month(None),
+        "week" => show_week(None, false, false),
+        "month" => show_month(None, false),
         other => anyhow::bail!(
             "Invalid default_view '{}' in config; expected one of: today, week, month.",
             other

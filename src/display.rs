@@ -151,11 +151,15 @@ pub fn render_event_details(event: &CalendarEvent) -> String {
     output
 }
 
-/// Format a week view (Monday-Sunday)
-pub fn render_week(events: &[CalendarEvent], start_date: NaiveDate) -> String {
+/// Format a week view (Monday-Sunday). Events are laid out in a grid with
+/// one column per day. When `agenda` is set, the full per-day listing is
+/// appended underneath.
+pub fn render_week(events: &[CalendarEvent], start_date: NaiveDate, agenda: bool) -> String {
     // Normalize to Monday
     let monday = start_date - Days::new(start_date.weekday().num_days_from_monday() as u64);
     let sunday = monday + Days::new(6);
+
+    let today = Local::now().date_naive();
 
     let mut output = String::new();
 
@@ -170,46 +174,143 @@ pub fn render_week(events: &[CalendarEvent], start_date: NaiveDate) -> String {
     output.push_str(&"=".repeat(title.len()));
     output.push_str("\n\n");
 
-    // Group events by day
-    let mut days: Vec<(NaiveDate, Vec<&CalendarEvent>)> = Vec::new();
+    const COL_WIDTH: usize = 14;
+    const MAX_LINES: usize = 3;
+    let rule = std::iter::repeat("-".repeat(COL_WIDTH)).take(7).collect::<Vec<_>>().join("|");
+
+    // Day header row
+    let mut header = String::new();
+    for i in 0..7 {
+        if i > 0 {
+            header.push('|');
+        }
+        let day = monday + Days::new(i);
+        let name = if day == today {
+            "TODAY".to_string()
+        } else {
+            day.format("%a").to_string()
+        };
+        header.push_str(&format!(
+            "{:<width$}",
+            format!("{} {}", name, day.format("%d")),
+            width = COL_WIDTH
+        ));
+    }
+    output.push_str(&format!("{}\n", header.trim_end()));
+    output.push_str(&format!("{}\n", rule));
+
+    // Each event that falls in this week spans the days it occurs on.
+    let days: Vec<NaiveDate> = (0..7).map(|i| monday + Days::new(i)).collect();
+    struct Placed<'a> {
+        event: &'a CalendarEvent,
+        first_day: usize,
+        last_day: usize,
+    }
+    let mut placed: Vec<Placed> = events
+        .iter()
+        .filter_map(|e| {
+            let span: Vec<usize> = days
+                .iter()
+                .enumerate()
+                .filter(|(_, d)| event_on_date(e, **d))
+                .map(|(i, _)| i)
+                .collect();
+            match (span.first(), span.last()) {
+                (Some(&first), Some(&last)) => Some(Placed {
+                    event: e,
+                    first_day: first,
+                    last_day: last,
+                }),
+                _ => None,
+            }
+        })
+        .collect();
+    placed.sort_by_key(|p| p.event.dtstart);
+
+    // Assign each event to the first grid row that is free on every day the
+    // event spans, so distinct events on the same day never share a row.
+    let mut rows: Vec<Vec<Option<usize>>> = Vec::new();
+    for (idx, p) in placed.iter().enumerate() {
+        let mut row = 0;
+        loop {
+            if rows.len() == row {
+                rows.push(vec![None; 7]);
+            }
+            if (p.first_day..=p.last_day).all(|d| rows[row][d].is_none()) {
+                break;
+            }
+            row += 1;
+        }
+        for d in p.first_day..=p.last_day {
+            rows[row][d] = Some(idx);
+        }
+    }
+
+    if rows.is_empty() {
+        output.push_str("\nNo events this week.\n");
+        return output;
+    }
+
+    for row in &rows {
+        // Wrap each cell's text into up to MAX_LINES physical rows.
+        let mut columns: Vec<Vec<String>> = Vec::with_capacity(7);
+        let mut height = 1usize;
+        for (d, cell) in row.iter().enumerate() {
+            let text = match cell {
+                Some(idx) => {
+                    let p = &placed[*idx];
+                    let summary = sanitize(&p.event.summary);
+                    if d == p.first_day && !p.event.all_day {
+                        if let Some(start) = p.event.dtstart {
+                            let time = start.with_timezone(&Local).format("%H:%M");
+                            format!("{} {}", time, summary)
+                        } else {
+                            summary
+                        }
+                    } else {
+                        summary
+                    }
+                }
+                None => String::new(),
+            };
+            let cell_lines = if text.is_empty() {
+                vec![String::new()]
+            } else {
+                wrap_cell(&text, COL_WIDTH, MAX_LINES)
+            };
+            height = height.max(cell_lines.len());
+            columns.push(cell_lines);
+        }
+
+        for l in 0..height {
+            let mut line = String::new();
+            for (d, cell_lines) in columns.iter().enumerate() {
+                if d > 0 {
+                    line.push('|');
+                }
+                let cell_line = cell_lines.get(l).map(String::as_str).unwrap_or("");
+                line.push_str(&format!("{:<width$}", cell_line, width = COL_WIDTH));
+            }
+            output.push_str(&format!("{}\n", line.trim_end()));
+        }
+        output.push_str(&format!("{}\n", rule));
+    }
+
+    if !agenda {
+        return output;
+    }
+
+    // Detailed day-by-day listing
     for i in 0..7 {
         let day = monday + Days::new(i);
         let day_events: Vec<&CalendarEvent> = events
             .iter()
             .filter(|e| event_on_date(e, day))
             .collect();
-        days.push((day, day_events));
-    }
-
-    // Day summary row: "Mon 15 (3)" etc
-    let today = Local::now().date_naive();
-    let mut summary = String::new();
-    for (day, day_events) in &days {
-        let count = day_events.len();
-        let name = if *day == today { "TODAY" } else { &day.format("%a").to_string() };
-        let label = if count > 0 {
-            format!("{} {} ({})", name, day.format("%d"), count)
-        } else {
-            format!("{} {}", name, day.format("%d"))
-        };
-        summary.push_str(&format!("{:<14}", label));
-    }
-    output.push_str(&format!("{}\n", summary.trim_end()));
-    output.push_str(&"-".repeat(summary.trim_end().len()));
-    output.push_str("\n");
-
-    // Detailed day-by-day listing
-    let total: usize = days.iter().map(|(_, e)| e.len()).sum();
-    if total == 0 {
-        output.push_str("\nNo events this week.\n");
-        return output;
-    }
-
-    for (day, day_events) in &days {
         if day_events.is_empty() {
             continue;
         }
-        let day_label = if *day == today {
+        let day_label = if day == today {
             format!("Today ({}, {})", day.format("%B %e"), day.format("%Y"))
         } else {
             format!("{}, {}", day.format("%A %B %e"), day.format("%Y"))
@@ -218,7 +319,7 @@ pub fn render_week(events: &[CalendarEvent], start_date: NaiveDate) -> String {
         output.push_str(&"-".repeat(day_label.len()));
         output.push_str("\n");
 
-        let mut sorted: Vec<&CalendarEvent> = day_events.iter().copied().collect();
+        let mut sorted: Vec<&CalendarEvent> = day_events;
         sorted.sort_by(|a, b| a.dtstart.cmp(&b.dtstart));
         for event in sorted {
             let time_str = format_event_time(event);
@@ -235,6 +336,64 @@ pub fn render_week(events: &[CalendarEvent], start_date: NaiveDate) -> String {
     }
 
     output
+}
+
+/// Wrap `text` into at most `max_lines` lines, each fitting in `width`
+/// characters. Words are broken greedily; words longer than the column width
+/// are hard-split. When the text does not fit, the last line ends with an
+/// ellipsis.
+fn wrap_cell(text: &str, width: usize, max_lines: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+
+    for word in text.split_whitespace() {
+        let fits = if line.is_empty() {
+            word.chars().count() <= width
+        } else {
+            line.chars().count() + 1 + word.chars().count() <= width
+        };
+        if !fits && !line.is_empty() {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        return vec![String::new()];
+    }
+
+    // Hard-break any line longer than the column width.
+    let mut broken: Vec<String> = Vec::new();
+    for l in lines.drain(..) {
+        if l.chars().count() <= width {
+            broken.push(l);
+            continue;
+        }
+        let mut rest = l;
+        while !rest.is_empty() {
+            let chunk: String = rest.chars().take(width).collect();
+            broken.push(chunk);
+            let n = rest.chars().take(width).count();
+            rest = rest.chars().skip(n).collect();
+        }
+    }
+
+    // Truncate to max_lines, marking dropped content with an ellipsis.
+    let overflow = broken.len() > max_lines;
+    broken.truncate(max_lines);
+    if overflow {
+        let last = broken.last_mut().unwrap();
+        if last.chars().count() >= width {
+            last.pop();
+        }
+        last.push('…');
+    }
+    broken
 }
 
 /// Format a month view (calendar grid)
@@ -470,9 +629,94 @@ mod tests {
         let end = start + chrono::Duration::hours(1);
         let events = vec![local_event("Meeting", start, end)];
 
-        let output = render_week(&events, monday);
+        let output = render_week(&events, monday, false);
         assert!(output.contains("Week 3"));
         assert!(output.contains("Meeting"));
+        // Grid mode does not show the detailed day listing.
+        assert!(!output.contains("Today (January 15"));
+    }
+
+    #[test]
+    fn test_render_week_agenda_appends_listing() {
+        let monday = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let start = Local.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).single().unwrap();
+        let end = start + chrono::Duration::hours(1);
+        let events = vec![local_event("Meeting", start, end)];
+
+        let output = render_week(&events, monday, true);
+        assert!(output.contains("Meeting"));
+        // Agenda mode appends the detailed per-day listing.
+        assert!(output.contains("January 15"));
+        assert!(output.contains("09:00 - 10:00"));
+    }
+
+    #[test]
+    fn test_render_week_grid_aligns_columns() {
+        let monday = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let mut events = Vec::new();
+        for (i, day) in (0..7).enumerate() {
+            let date = monday + chrono::Days::new(i as u64);
+            let start = Local.with_ymd_and_hms(date.year(), date.month(), date.day(), 9, 0, 0).single().unwrap();
+            let end = start + chrono::Duration::hours(1);
+            events.push(local_event(&format!("Event-{}", i), start, end));
+        }
+
+        let output = render_week(&events, monday, false);
+        // Every day header appears; today is highlighted.
+        assert!(output.contains("Mon 15"));
+        assert!(output.contains("Sun 21"));
+        // Columns are separated with '|'.
+        assert!(output.contains("|"));
+        // Grid has one row of event names and each appears once.
+        assert!(output.contains("09:00 Event-0"));
+        assert!(output.contains("Event-6"));
+        assert!(!output.contains("Tuesday"));
+    }
+
+    #[test]
+    fn test_render_week_wraps_long_names() {
+        let monday = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let start = Local.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).single().unwrap();
+        let end = start + chrono::Duration::hours(1);
+        let long = "08:00 Enterprise Architecture Design Review Workshop";
+        let events = vec![local_event(long, start, end)];
+
+        let output = render_week(&events, monday, false);
+        // Wrapped across multiple physical lines within the column.
+        assert!(output.contains("Enterprise"));
+        assert!(output.contains("Architecture"));
+        // At most three lines, the last one marked with an ellipsis.
+        assert!(output.contains("…"));
+    }
+
+    #[test]
+    fn test_wrap_cell_fits_on_one_line() {
+        assert_eq!(wrap_cell("09:00 Standup", 14, 3), vec!["09:00 Standup"]);
+        assert_eq!(wrap_cell("", 14, 3), vec![""]);
+    }
+
+    #[test]
+    fn test_wrap_cell_wraps_by_words() {
+        assert_eq!(
+            wrap_cell("10:00 1:1 with Alexandria", 14, 3),
+            vec!["10:00 1:1 with", "Alexandria"]
+        );
+    }
+
+    #[test]
+    fn test_wrap_cell_truncates_at_max_lines() {
+        // Long title: more than three wrapped lines, marked with an ellipsis.
+        let lines = wrap_cell("Enterprise Architecture Design Review Workshop", 14, 3);
+        assert_eq!(lines.len(), 3);
+        assert!(lines.last().unwrap().ends_with('…'));
+    }
+
+    #[test]
+    fn test_wrap_cell_hard_splits_long_words() {
+        let lines = wrap_cell("Supercalifragilisticexpialidocious", 14, 3);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.concat(), "Supercalifragilisticexpialidocious");
+        assert!(lines.iter().all(|l| l.chars().count() <= 14));
     }
 
     #[test]
