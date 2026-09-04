@@ -3,6 +3,7 @@ mod config;
 mod db;
 mod display;
 mod ical;
+mod subscribe;
 
 use chrono::{Days, Local, Months, NaiveDate, NaiveTime};
 use clap::{Parser, Subcommand};
@@ -140,6 +141,16 @@ enum Commands {
     /// List available calendars
     Calendars,
 
+    /// Subscribe to an online ICS calendar feed
+    Subscribe {
+        /// URL of the .ics feed
+        url: String,
+
+        /// Display name for the subscription (defaults to the feed host)
+        #[arg(long)]
+        name: Option<String>,
+    },
+
     /// Create a config file for CalDAV synchronization
     Init {
         /// CalDAV server URL (prompted if omitted)
@@ -226,6 +237,12 @@ async fn main() -> anyhow::Result<()> {
                 total,
                 summary.calendars.len(),
             );
+
+            if !config.subscriptions.is_empty() {
+                println!();
+                refresh_subscriptions(&config, &db).await?;
+            }
+
             Ok(())
         }
         Some(Commands::New {
@@ -311,6 +328,7 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Some(Commands::Subscribe { url, name }) => handle_subscribe(&url, name.as_deref()).await,
         Some(Commands::Init {
             url,
             username,
@@ -845,6 +863,58 @@ fn handle_init(
         "Next: run 'rcal sync' to pull your calendars. The password will be taken from\n\
          password_command, the RCAL_PASSWORD environment variable, or an interactive prompt."
     );
+    Ok(())
+}
+
+/// Refetch every configured ICS subscription, reporting a per-feed summary.
+/// A failing feed is reported but does not abort the remaining updates.
+async fn refresh_subscriptions(
+    config: &config::Config,
+    db: &db::Database,
+) -> anyhow::Result<()> {
+    println!("Refreshing {} subscription(s):", config.subscriptions.len());
+    for sub in &config.subscriptions {
+        match subscribe::refresh_subscription(db, &sub.name, &sub.url).await {
+            Ok(result) => {
+                println!(
+                    "  {}: +{} added, ~{} updated, -{} deleted",
+                    display::sanitize(&result.name),
+                    result.added,
+                    result.updated,
+                    result.deleted
+                );
+            }
+            Err(err) => {
+                eprintln!("  {}: {}", display::sanitize(&sub.name), err);
+            }
+        }
+    }
+    println!();
+    Ok(())
+}
+
+/// Handle `rcal subscribe`: add the feed to the config and fetch it once.
+async fn handle_subscribe(url: &str, name: Option<&str>) -> anyhow::Result<()> {
+    let mut config = config::Config::load()?;
+    let display_name = name
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| {
+            url::Url::parse(url)
+                .ok()
+                .and_then(|u| u.host_str().map(|h| h.to_string()))
+                .unwrap_or_else(|| url.to_string())
+        });
+
+    let db = db::Database::open()?;
+    if config.add_subscription(display_name.clone(), url.to_string()) {
+        config.write_to(&config::Config::config_path()?)?;
+        println!("Subscribed to {} ({}).", display_name, url);
+    } else {
+        println!("Already subscribed to {}; refreshing.", url);
+    }
+    println!();
+    refresh_subscriptions(&config, &db).await?;
     Ok(())
 }
 
