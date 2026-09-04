@@ -52,8 +52,10 @@ cargo test           # run the full suite (unit + mock-server tests)
   `handle_new`, `prompt`, `parse_time`, `parse_date`, `parse_month`,
   sync output rendering.
 - `src/config.rs` — TOML config, default paths, `Config::new`/`write_to`
-  (used by `rcal init`). `Config::load()` errors with a "Run 'rcal init'"
-  hint when the file is missing.
+  (used by `rcal add-account`). `Config::server` is `Option<ServerConfig>`
+  (absent for subscription-only setups); `handle_subscribe`/`subscribe.rs`
+  auto-create a server-less config. `Config::load()` errors with a hint
+  mentioning `rcal add-account`/`rcal subscribe` when the file is missing.
 - `src/db.rs` — `rusqlite` database. Schema: `calendars` (`id`, `name`,
   `color`, `ctag`, `sync_token`) and `events` (keyed on `uid`, with
   `calendar_id`, `etag`, `ical_data`, `updated_at`, ...). Key types:
@@ -63,6 +65,8 @@ cargo test           # run the full suite (unit + mock-server tests)
 - `src/caldav.rs` — `CalDavClient`, password resolution, PROPFIND discovery,
   REPORT `calendar-query` fetch, ETag-based sync, PUT push, XML helpers,
   wiremock-based tests.
+- `src/subscribe.rs` — ICS subscription fetch (`refresh_subscription`),
+  full-replace sync logic (`apply_calendar`), scheme validation, tests.
 - `src/display.rs` — day/week/month renderers.
 
 Key signatures to remember:
@@ -71,8 +75,9 @@ Key signatures to remember:
 - `upsert_event(...)` — same 4-arg shape
 - `set_sync_metadata(uid, calendar_id, etag, ical_data)`
 - `get_events_for_calendar(calendar_id)` -> `Vec<StoredEvent>`
-- `handle_init` in `main.rs` implements `rcal init` (interactive prompts,
-  `--force` guard, XDG-aware path).
+- `handle_add_account` in `main.rs` implements `rcal add-account`
+  (interactive prompts, `--force` guard, XDG-aware path, preserves existing
+  config settings in place). `handle_subscribe` implements `rcal subscribe`.
 
 Events are keyed only on `uid`; the same UID in two calendars collides in the
 local cache — a known limitation, handle it if the task surfaces it.
@@ -80,8 +85,9 @@ local cache — a known limitation, handle it if the task surfaces it.
 ## Configuration and credentials
 
 - Config: `$XDG_CONFIG_HOME/rcal/config.toml` (default `~/.config/rcal/config.toml`).
-  Created by `rcal init` (`Config::new` + `Config::write_to`); refuses to
-  overwrite unless `--force` or interactive confirmation is given.
+  Created by `rcal add-account` (`Config::new` + `Config::write_to`); refuses to
+  overwrite unless `--force` or interactive confirmation is given. `rcal subscribe`
+  also creates a server-less config containing only `[[subscriptions]]` entries.
 - Database: `$XDG_DATA_HOME/rcal/rcal.db` (default `~/.local/share/rcal/rcal.db`).
 - Password resolution order: `password_command` (stdout = password) ->
   `RCAL_PASSWORD` env var -> interactive `rpassword` prompt.

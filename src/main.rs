@@ -151,8 +151,8 @@ enum Commands {
         name: Option<String>,
     },
 
-    /// Create a config file for CalDAV synchronization
-    Init {
+    /// Add a CalDAV account
+    AddAccount {
         /// CalDAV server URL (prompted if omitted)
         #[arg(short, long)]
         url: Option<String>,
@@ -194,9 +194,16 @@ async fn main() -> anyhow::Result<()> {
         }) => handle_import(&file, add, dry_run),
         Some(Commands::Sync) => {
             let config = config::Config::load()?;
+            let server = config
+                .server
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!(
+                    "No CalDAV account configured. Run 'rcal add-account' to connect one,\n\
+                     or 'rcal subscribe <URL>' for an online ICS feed."
+                ))?;
             let client = caldav::CalDavClient::new(&config)?;
 
-            println!("Discovering calendars at {} ...", config.server.url);
+            println!("Discovering calendars at {} ...", server.url);
             let calendars = client.discover_calendars().await?;
             println!("Found {} calendar(s):", calendars.len());
             for cal in &calendars {
@@ -329,12 +336,12 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some(Commands::Subscribe { url, name }) => handle_subscribe(&url, name.as_deref()).await,
-        Some(Commands::Init {
+        Some(Commands::AddAccount {
             url,
             username,
             password_command,
             force,
-        }) => handle_init(url, username, password_command, force),
+        }) => handle_add_account(url, username, password_command, force),
         None => run_default_view(),
     }
 }
@@ -790,8 +797,9 @@ fn handle_new(
     Ok(())
 }
 
-/// Handle the `init` command: create a config file from flags or prompts
-fn handle_init(
+/// Handle the `add-account` command: attach a CalDAV account to the config,
+/// preserving any existing settings (e.g. ICS subscriptions).
+fn handle_add_account(
     url_flag: Option<String>,
     username_flag: Option<String>,
     password_command_flag: Option<String>,
@@ -801,17 +809,21 @@ fn handle_init(
 
     let interactive = std::io::stdin().is_terminal();
     let path = config::Config::config_path()?;
+    let created = !path.exists();
 
-    if path.exists() {
+    if !created {
         if !force && interactive {
             let answer = prompt(
-                &format!("Config file exists at {}; overwrite? [y/N]", path.display()),
+                &format!(
+                    "A config file exists at {}; update its CalDAV account? [y/N]",
+                    path.display()
+                ),
                 Some("n"),
             )?
             .unwrap_or_else(|| "n".to_string())
             .to_lowercase();
             if !matches!(answer.as_str(), "y" | "yes") {
-                println!("Init cancelled.");
+                println!("Add account cancelled.");
                 return Ok(());
             }
         } else if !force {
@@ -851,13 +863,23 @@ fn handle_init(
         _ => None,
     };
 
-    let config = config::Config::new(url, username, password_command);
+    let mut config = config::Config::new(url.clone(), username.clone(), password_command);
+    if let Ok(existing) = config::Config::load_from(&path) {
+        config.display = existing.display;
+        config.calendars = existing.calendars;
+        config.notifications = existing.notifications;
+        config.subscriptions = existing.subscriptions;
+    }
     config.write_to(&path)?;
 
-    println!("Config file created at {}", path.display());
+    println!(
+        "Config file {} at {}",
+        if created { "created" } else { "updated" },
+        path.display()
+    );
     println!();
-    println!("Server:   {}", config.server.url);
-    println!("Username: {}", config.server.username);
+    println!("Server:   {}", url);
+    println!("Username: {}", username);
     println!();
     println!(
         "Next: run 'rcal sync' to pull your calendars. The password will be taken from\n\
@@ -894,8 +916,17 @@ async fn refresh_subscriptions(
 }
 
 /// Handle `rcal subscribe`: add the feed to the config and fetch it once.
+/// Works standalone: when no config file exists yet, a server-less config
+/// (just `[[subscriptions]]`) is created.
 async fn handle_subscribe(url: &str, name: Option<&str>) -> anyhow::Result<()> {
-    let mut config = config::Config::load()?;
+    let path = config::Config::config_path()?;
+    let mut config = if path.exists() {
+        config::Config::load_from(&path)?
+    } else {
+        let config = config::Config::default();
+        config.write_to(&path)?;
+        config
+    };
     let display_name = name
         .map(|n| n.trim().to_string())
         .filter(|n| !n.is_empty())

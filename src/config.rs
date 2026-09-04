@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
-    pub server: ServerConfig,
+    /// CalDAV account. Absent when the user only has ICS subscriptions.
+    pub server: Option<ServerConfig>,
     #[serde(default)]
     pub display: DisplayConfig,
     #[serde(default)]
@@ -99,6 +100,18 @@ fn default_reminder_minutes() -> Vec<u32> {
     vec![15, 5]
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            server: None,
+            display: DisplayConfig::default(),
+            calendars: CalendarsConfig::default(),
+            notifications: NotificationsConfig::default(),
+            subscriptions: Vec::new(),
+        }
+    }
+}
+
 impl Config {
     /// Build a config from CalDAV server credentials
     pub fn new(
@@ -107,11 +120,11 @@ impl Config {
         password_command: Option<String>,
     ) -> Self {
         Self {
-            server: ServerConfig {
+            server: Some(ServerConfig {
                 url: url.into(),
                 username: username.into(),
                 password_command,
-            },
+            }),
             display: DisplayConfig::default(),
             calendars: CalendarsConfig::default(),
             notifications: NotificationsConfig::default(),
@@ -156,7 +169,8 @@ impl Config {
 
         if !config_path.exists() {
             anyhow::bail!(
-                "Config file not found at {}. Run 'rcal init' to create one.",
+                "Config file not found at {}. Run 'rcal add-account' to connect a CalDAV server,\n\
+                 or 'rcal subscribe <URL>' to subscribe to an online ICS feed.",
                 config_path.display()
             );
         }
@@ -224,12 +238,10 @@ mod tests {
         config.write_to(&path).unwrap();
 
         let loaded = Config::load_from(&path).unwrap();
-        assert_eq!(loaded.server.url, "https://dav.example.com/");
-        assert_eq!(loaded.server.username, "alice");
-        assert_eq!(
-            loaded.server.password_command.as_deref(),
-            Some("pass show caldav")
-        );
+        let server = loaded.server.as_ref().unwrap();
+        assert_eq!(server.url, "https://dav.example.com/");
+        assert_eq!(server.username, "alice");
+        assert_eq!(server.password_command.as_deref(), Some("pass show caldav"));
         assert_eq!(loaded.display.default_view, "today");
 
         std::fs::remove_file(&path).ok();
@@ -243,7 +255,7 @@ mod tests {
             .unwrap();
 
         let loaded = Config::load_from(&path).unwrap();
-        assert_eq!(loaded.server.password_command, None);
+        assert_eq!(loaded.server.as_ref().unwrap().password_command, None);
 
         std::fs::remove_file(&path).ok();
     }
@@ -300,6 +312,37 @@ mod tests {
             .unwrap();
         let loaded = Config::load_from(&path).unwrap();
         assert!(loaded.subscriptions.is_empty());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_default_config_has_no_server() {
+        let config = Config::default();
+        assert!(config.server.is_none());
+
+        let content = toml::to_string(&config).unwrap();
+        assert!(!content.contains("[server]"), "server section must be omitted");
+
+        let loaded: Config = toml::from_str(&content).unwrap();
+        assert!(loaded.server.is_none());
+    }
+
+    #[test]
+    fn test_serverless_config_roundtrips() {
+        let path = temp_config_path();
+        let mut config = Config::default();
+        config
+            .subscriptions
+            .push(IcsSubscription {
+                name: "Feed".to_string(),
+                url: "https://example.com/feed.ics".to_string(),
+            });
+        config.write_to(&path).unwrap();
+
+        let loaded = Config::load_from(&path).unwrap();
+        assert!(loaded.server.is_none());
+        assert_eq!(loaded.subscriptions.len(), 1);
+
         std::fs::remove_file(&path).ok();
     }
 

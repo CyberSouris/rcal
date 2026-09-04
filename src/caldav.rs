@@ -89,7 +89,12 @@ pub struct SyncSummary {
 /// Resolve the server password using, in order:
 /// `password_command`, the `RCAL_PASSWORD` env var, then an interactive prompt.
 pub fn resolve_password(config: &Config) -> Result<String> {
-    if let Some(cmd) = &config.server.password_command {
+    let server = config
+        .server
+        .as_ref()
+        .context("No CalDAV account configured; run 'rcal add-account'")?;
+
+    if let Some(cmd) = &server.password_command {
         let output = std::process::Command::new("sh")
             .arg("-c")
             .arg(cmd)
@@ -118,7 +123,7 @@ pub fn resolve_password(config: &Config) -> Result<String> {
 
     eprint!(
         "Password for {}@{}: ",
-        config.server.username, config.server.url
+        server.username, server.url
     );
     let password = rpassword::read_password().context("Failed to read password")?;
     Ok(password)
@@ -160,7 +165,11 @@ pub struct CalDavClient {
 
 impl CalDavClient {
     pub fn new(config: &Config) -> Result<Self> {
-        validate_scheme(&config.server.url)?;
+        let server = config
+            .server
+            .as_ref()
+            .context("No CalDAV account configured; run 'rcal add-account'")?;
+        validate_scheme(&server.url)?;
         let password = resolve_password(config)?;
         let http = reqwest::Client::builder()
             .user_agent(concat!("rcal/", env!("CARGO_PKG_VERSION")))
@@ -168,8 +177,8 @@ impl CalDavClient {
             .context("Failed to build HTTP client")?;
         Ok(Self {
             http,
-            base_url: config.server.url.clone(),
-            username: config.server.username.clone(),
+            base_url: server.url.clone(),
+            username: server.username.clone(),
             password,
         })
     }
