@@ -430,7 +430,57 @@ impl CalDavClient {
             .map(|s| s.to_string()))
     }
 
-    async fn sync_calendar(
+    /// Delete an event resource on the server. A 404 is treated as success
+/// (the resource is already gone). When an etag is supplied it is sent as
+/// `If-Match` so a concurrent change on the server aborts the delete.
+pub async fn delete_event(
+    &self,
+    calendar_href: &str,
+    href: &str,
+    etag: Option<&str>,
+) -> Result<()> {
+    let base = resolve_href(&self.base_url, calendar_href)?
+        .trim_end_matches('/')
+        .to_string();
+    let url = format!("{}/{}", base, urlencode_path_segment(href));
+
+    let mut req = self
+        .http
+        .delete(&url)
+        .basic_auth(&self.username, Some(&self.password));
+    if let Some(etag) = etag {
+        req = req.header("If-Match", etag);
+    }
+    let resp = req
+        .send()
+        .await
+        .with_context(|| format!("DELETE request failed: {}", url))?;
+
+    let status = resp.status();
+    if status.is_success() || status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(());
+    }
+    let text = self.read_body_limited(resp).await.unwrap_or_default();
+    bail!(
+        "DELETE {} returned status {}: {}",
+        url,
+        status,
+        display::sanitize(&truncate(&text, 300))
+    );
+}
+
+/// Delete an event on the server, deriving the resource name from its UID.
+pub async fn delete_event_by_uid(
+    &self,
+    calendar_href: &str,
+    uid: &str,
+    etag: Option<&str>,
+) -> Result<()> {
+    self.delete_event(calendar_href, &href_for_uid(uid), etag)
+        .await
+}
+
+async fn sync_calendar(
         &self,
         db: &Database,
         cal: &RemoteCalendar,
@@ -1131,5 +1181,56 @@ END:VCALENDAR</c:calendar-data>
         assert_eq!(cals.len(), 1);
         assert_eq!(cals[0].name, "Work");
         assert_eq!(cals[0].href, "https://example.com/p/work/");
+    }
+
+    #[tokio::test]
+    async fn test_delete_event_sends_delete_with_etag() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let work = format!("{}/p/work/", server.uri());
+
+        Mock::given(method("DELETE"))
+            .and(path("/p/work/evt-1.ics"))
+            .and(header("If-Match", "\"etag-1\""))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let client = CalDavClient::from_parts(&server.uri(), "alice", "pw").unwrap();
+        client
+            .delete_event(&work, "evt-1.ics", Some("\"etag-1\""))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_delete_event_treats_not_found_as_success() {
+        use wiremock::matchers::method;
+        let server = wiremock::MockServer::start().await;
+
+        // No mock is mounted: any request returns 404.
+        let client = CalDavClient::from_parts(&server.uri(), "alice", "pw").unwrap();
+        client.delete_event(&server.uri(), "ghost.ics", None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_delete_event_fails_on_server_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let work = format!("{}/p/work/", server.uri());
+
+        Mock::given(method("DELETE"))
+            .and(path("/p/work/evt-1.ics"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("server error"))
+            .mount(&server)
+            .await;
+
+        let client = CalDavClient::from_parts(&server.uri(), "alice", "pw").unwrap();
+        let err = client.delete_event(&work, "evt-1.ics", None).await.unwrap_err();
+        assert!(err.to_string().contains("status 500"), "unexpected error: {}", err);
     }
 }

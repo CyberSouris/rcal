@@ -11,6 +11,8 @@ use crate::ical::CalendarEvent;
 pub struct StoredEvent {
     pub event: CalendarEvent,
     pub etag: Option<String>,
+    /// The calendar this event belongs to (`None` for local-only events).
+    pub calendar_id: Option<String>,
 }
 
 pub struct Database {
@@ -483,6 +485,7 @@ impl Database {
             Ok(StoredEvent {
                 event: event_stub_from_row(row),
                 etag,
+                calendar_id: Some(calendar_id.to_string()),
             })
         })?;
 
@@ -560,6 +563,48 @@ impl Database {
         let end = start + chrono::Duration::days(1);
 
         self.get_events_in_range(start, end)
+    }
+
+    /// Load all events for a specific day together with their calendar and
+    /// sync metadata, so a caller can tell a local event from one synced to a
+    /// CalDAV server or an ICS subscription.
+    pub fn get_stored_events_for_day(&self, date: chrono::NaiveDate) -> Result<Vec<StoredEvent>> {
+        let start = chrono::Local
+            .with_ymd_and_hms(date.year(), date.month(), date.day(), 0, 0, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc);
+        let end = start + chrono::Duration::days(1);
+
+        let start_str = start.to_rfc3339();
+        let end_str = end.to_rfc3339();
+
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT uid, summary, description, location, url,
+                        dtstart, dtend, all_day, status, recurrence,
+                        etag, calendar_id
+                 FROM events
+                 WHERE dtstart IS NOT NULL
+                   AND ((dtstart >= ?1 AND dtstart < ?2)
+                        OR (dtend > ?1 AND dtend <= ?2)
+                        OR (dtstart <= ?1 AND dtend >= ?2))
+                 ORDER BY dtstart",
+            )?;
+
+        let rows = stmt.query_map(params![start_str, end_str], |row| {
+            let etag: Option<String> = row.get(10)?;
+            let calendar_id: Option<String> = row.get(11)?;
+            Ok(StoredEvent {
+                event: event_stub_from_row(row),
+                etag,
+                calendar_id,
+            })
+        })?;
+
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("Failed to fetch stored events")
     }
 }
 
@@ -961,6 +1006,47 @@ mod tests {
         let events = db.get_all_events(Some(from), Some(to)).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].summary, "Feb Event");
+    }
+
+    #[test]
+    fn test_get_stored_events_for_day_includes_metadata() {
+        let db = test_db();
+        db.insert_calendar("cal-a", "Alpha", None).unwrap();
+
+        let morning = chrono::Local
+            .with_ymd_and_hms(2024, 1, 15, 9, 0, 0)
+            .single()
+            .unwrap();
+        db.insert_event(
+            &event(
+                "uid-cal",
+                "Synced",
+                morning.with_timezone(&Utc),
+                (morning + chrono::Duration::hours(1)).with_timezone(&Utc),
+            ),
+            Some("cal-a"),
+            Some("BEGIN:VCALENDAR"),
+            Some("etag-1"),
+        )
+        .unwrap();
+        db.insert_event(
+            &event("uid-local", "Local Only", morning.with_timezone(&Utc), dt(2024, 1, 15, 11, 0)),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let stored = db.get_stored_events_for_day(chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()).unwrap();
+        assert_eq!(stored.len(), 2);
+
+        let synced = stored.iter().find(|s| s.event.uid == "uid-cal").unwrap();
+        assert_eq!(synced.calendar_id.as_deref(), Some("cal-a"));
+        assert_eq!(synced.etag.as_deref(), Some("etag-1"));
+
+        let local_only = stored.iter().find(|s| s.event.uid == "uid-local").unwrap();
+        assert_eq!(local_only.calendar_id, None);
+        assert_eq!(local_only.etag, None);
     }
 
     #[test]

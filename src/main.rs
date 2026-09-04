@@ -138,6 +138,17 @@ enum Commands {
         to: Option<String>,
     },
 
+    /// Delete an event locally and, for CalDAV-synced events, on the server
+    Delete {
+        /// Event to delete: YYYY-MM-DD@HH:MM (event starting at that time),
+        /// or just a date when exactly one event starts that day
+        target: String,
+
+        /// Delete without confirmation
+        #[arg(short = 'f', long)]
+        force: bool,
+    },
+
     /// List available calendars
     Calendars,
 
@@ -336,6 +347,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some(Commands::Subscribe { url, name }) => handle_subscribe(&url, name.as_deref()).await,
+        Some(Commands::Delete { target, force }) => handle_delete(&target, force).await,
         Some(Commands::AddAccount {
             url,
             username,
@@ -949,6 +961,131 @@ async fn handle_subscribe(url: &str, name: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// How an attempted event selection resolved.
+#[derive(Debug)]
+enum DeleteSelection {
+    Found(usize),
+    None_,
+    Ambiguous(Vec<String>),
+}
+
+/// Select the single stored event identified by `date` and, when given, an
+/// exact wall-clock start time. Events are matched on their local start date.
+fn select_event_for_delete(
+    stored: &[db::StoredEvent],
+    date: NaiveDate,
+    time: Option<NaiveTime>,
+) -> DeleteSelection {
+    let matches: Vec<(usize, &db::StoredEvent)> = stored
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| {
+            let Some(dtstart) = s.event.dtstart else {
+                return false;
+            };
+            let local = dtstart.with_timezone(&Local);
+            local.date_naive() == date && time.map(|t| local.time() == t).unwrap_or(true)
+        })
+        .collect();
+
+    match matches.len() {
+        0 => DeleteSelection::None_,
+        1 => DeleteSelection::Found(matches[0].0),
+        _ => DeleteSelection::Ambiguous(
+            matches.iter().map(|(_, s)| s.event.uid.clone()).collect(),
+        ),
+    }
+}
+
+/// Handle `rcal delete`: remove an event from the local cache and, when it
+/// belongs to a CalDAV calendar, from the server too. Events cached from an
+/// ICS subscription are only removed locally (the feed re-adds them on the
+/// next refresh).
+async fn handle_delete(target: &str, force: bool) -> anyhow::Result<()> {
+    use std::io::IsTerminal;
+
+    let (date, time) = parse_show_arg(target)?;
+    let db = db::Database::open()?;
+    let stored = db.get_stored_events_for_day(date)?;
+
+    let index = match select_event_for_delete(&stored, date, time) {
+        DeleteSelection::Found(i) => i,
+        DeleteSelection::None_ => {
+            match time {
+                Some(t) => anyhow::bail!("No event starts at {} on {}", t, date),
+                None => anyhow::bail!("No event starts on {}", date),
+            }
+        }
+        DeleteSelection::Ambiguous(uids) => {
+            match time {
+                Some(t) => anyhow::bail!(
+                    "Multiple events start at {} on {}: {}. Use a more precise time.",
+                    t,
+                    date,
+                    uids.join(", ")
+                ),
+                None => anyhow::bail!(
+                    "Multiple events start on {}: {}. Specify an exact start time (YYYY-MM-DD@HH:MM).",
+                    date,
+                    uids.join(", ")
+                ),
+            }
+        }
+    };
+
+    let stored_event = &stored[index];
+    let event = &stored_event.event;
+    let calendars = db.get_calendars()?;
+    let cal_name = stored_event
+        .calendar_id
+        .as_deref()
+        .and_then(|id| calendars.iter().find(|c| c.id == id))
+        .map(|c| c.name.clone())
+        .unwrap_or_else(|| "local (no calendar)".to_string());
+
+    println!("Delete event: {}", display::sanitize(&event.summary));
+    println!("  {}", format_event_time(event));
+    println!("  Calendar: {}", display::sanitize(&cal_name));
+
+    if !force {
+        if !std::io::stdin().is_terminal() {
+            anyhow::bail!("Refusing to delete without confirmation; pass --force.");
+        }
+        let answer = prompt("Delete? [y/N]", Some("n"))?
+            .unwrap_or_else(|| "n".to_string())
+            .to_lowercase();
+        if !matches!(answer.as_str(), "y" | "yes") {
+            println!("Delete cancelled.");
+            return Ok(());
+        }
+    }
+
+    match stored_event.calendar_id.as_deref() {
+        None => {
+            db.delete_event(None, &event.uid)?;
+            println!("Event deleted (local).");
+        }
+        Some(cal_id) => {
+            let config = config::Config::load()?;
+            if config.subscriptions.iter().any(|s| s.url == cal_id) {
+                db.delete_event(Some(cal_id), &event.uid)?;
+                println!(
+                    "Event deleted from subscription '{}' (it returns on the next refresh).",
+                    display::sanitize(&cal_name)
+                );
+            } else {
+                let client = caldav::CalDavClient::new(&config)?;
+                client
+                    .delete_event_by_uid(cal_id, &event.uid, stored_event.etag.as_deref())
+                    .await?;
+                db.delete_event(Some(cal_id), &event.uid)?;
+                println!("Event deleted from CalDAV server and local cache.");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Read one line from stdin. Returns `None` when the user entered nothing.
 fn prompt(label: &str, default: Option<&str>) -> anyhow::Result<Option<String>> {
     let prompt_text = match default {
@@ -1054,4 +1191,108 @@ fn parse_month(s: &str) -> anyhow::Result<NaiveDate> {
 
     NaiveDate::from_ymd_opt(year, month, 1)
         .ok_or_else(|| anyhow::anyhow!("Invalid month: {} (expected YYYY-MM)", s))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Datelike, TimeZone, Utc};
+
+    fn stored_event(
+        uid: &str,
+        summary: &str,
+        date: NaiveDate,
+        hour: u32,
+        min: u32,
+        cal_id: Option<&str>,
+        etag: Option<&str>,
+    ) -> db::StoredEvent {
+        let start = chrono::Local
+            .with_ymd_and_hms(date.year(), date.month(), date.day(), hour, min, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc);
+        let end = start + chrono::Duration::hours(1);
+        db::StoredEvent {
+            event: ical::CalendarEvent {
+                uid: uid.to_string(),
+                summary: summary.to_string(),
+                description: None,
+                location: None,
+                url: None,
+                dtstart: Some(start),
+                dtend: Some(end),
+                all_day: false,
+                status: None,
+                recurrence: None,
+            },
+            etag: etag.map(String::from),
+            calendar_id: cal_id.map(String::from),
+        }
+    }
+
+    #[test]
+    fn test_select_exact_time() {
+        let d = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let events = vec![
+            stored_event("a", "Morning", d, 9, 0, None, None),
+            stored_event("b", "Afternoon", d, 14, 0, None, None),
+        ];
+        let t = NaiveTime::from_hms_opt(14, 0, 0).unwrap();
+        match select_event_for_delete(&events, d, Some(t)) {
+            DeleteSelection::Found(i) => assert_eq!(events[i].event.uid, "b"),
+            other => panic!("expected Found, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_select_single_event_no_time() {
+        let d = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let events = vec![stored_event("a", "Only event", d, 9, 0, None, None)];
+        match select_event_for_delete(&events, d, None) {
+            DeleteSelection::Found(i) => assert_eq!(events[i].event.uid, "a"),
+            other => panic!("expected Found, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_select_ambiguous_no_time() {
+        let d = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let events = vec![
+            stored_event("a", "Morning", d, 9, 0, None, None),
+            stored_event("b", "Afternoon", d, 14, 0, None, None),
+        ];
+        match select_event_for_delete(&events, d, None) {
+            DeleteSelection::Ambiguous(uids) => {
+                assert!(uids.contains(&"a".to_string()));
+                assert!(uids.contains(&"b".to_string()));
+            }
+            other => panic!("expected Ambiguous, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_select_no_match() {
+        let d = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let events = vec![stored_event("a", "Morning", d, 9, 0, None, None)];
+        let t = NaiveTime::from_hms_opt(14, 0, 0).unwrap();
+        assert!(matches!(
+            select_event_for_delete(&events, d, Some(t)),
+            DeleteSelection::None_
+        ));
+    }
+
+    #[test]
+    fn test_select_ignores_other_days() {
+        let d15 = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let d16 = NaiveDate::from_ymd_opt(2024, 1, 16).unwrap();
+        let events = vec![
+            stored_event("a", "Day 15", d15, 9, 0, None, None),
+            stored_event("b", "Day 16", d16, 9, 0, None, None),
+        ];
+        match select_event_for_delete(&events, d15, None) {
+            DeleteSelection::Found(i) => assert_eq!(events[i].event.uid, "a"),
+            other => panic!("expected Found, got {:?}", other),
+        }
+    }
 }
