@@ -12,6 +12,17 @@ pub struct Config {
     pub calendars: CalendarsConfig,
     #[serde(default)]
     pub notifications: NotificationsConfig,
+    #[serde(default)]
+    pub subscriptions: Vec<IcsSubscription>,
+}
+
+/// A read-only online ICS calendar that rcal fetches and caches locally.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct IcsSubscription {
+    /// Display name shown in `rcal calendars`.
+    pub name: String,
+    /// URL of the .ics feed.
+    pub url: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -104,6 +115,7 @@ impl Config {
             display: DisplayConfig::default(),
             calendars: CalendarsConfig::default(),
             notifications: NotificationsConfig::default(),
+            subscriptions: Vec::new(),
         }
     }
 
@@ -181,6 +193,16 @@ impl Config {
     pub fn db_path() -> Result<PathBuf> {
         Ok(Self::data_dir()?.join("rcal.db"))
     }
+
+    /// Add an ICS subscription. Returns `false` (and leaves the config
+    /// untouched) if the URL is already subscribed.
+    pub fn add_subscription(&mut self, name: String, url: String) -> bool {
+        if self.subscriptions.iter().any(|s| s.url == url) {
+            return false;
+        }
+        self.subscriptions.push(IcsSubscription { name, url });
+        true
+    }
 }
 
 #[cfg(test)]
@@ -236,6 +258,48 @@ mod tests {
         let loaded = Config::load_from(&path).unwrap();
         assert_eq!(loaded.display.default_view, "month");
 
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_subscriptions_roundtrip() {
+        let path = temp_config_path();
+        let mut config = Config::new("https://dav.example.com/", "alice", None);
+        assert!(config.add_subscription(
+            "Holidays".to_string(),
+            "https://example.com/holidays.ics".to_string()
+        ));
+        // Duplicate URL is rejected.
+        assert!(!config.add_subscription(
+            "Holidays Again".to_string(),
+            "https://example.com/holidays.ics".to_string()
+        ));
+        config.write_to(&path).unwrap();
+
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.subscriptions.len(), 1);
+        assert_eq!(loaded.subscriptions[0].name, "Holidays");
+        assert_eq!(loaded.subscriptions[0].url, "https://example.com/holidays.ics");
+        assert!(loaded
+            .subscriptions
+            .iter()
+            .any(|s| s.url == "https://example.com/holidays.ics"));
+        assert!(!loaded
+            .subscriptions
+            .iter()
+            .any(|s| s.url == "https://example.com/other.ics"));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_subscriptions_default_to_empty() {
+        let path = temp_config_path();
+        Config::new("https://dav.example.com/", "alice", None)
+            .write_to(&path)
+            .unwrap();
+        let loaded = Config::load_from(&path).unwrap();
+        assert!(loaded.subscriptions.is_empty());
         std::fs::remove_file(&path).ok();
     }
 
