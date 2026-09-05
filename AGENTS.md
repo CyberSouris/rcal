@@ -49,8 +49,9 @@ cargo test           # run the full suite (unit + mock-server tests)
 ## Code map
 
 - `src/main.rs` — clap CLI, subcommand dispatch, `handle_import`,
-  `handle_new`, `prompt`, `parse_time`, `parse_date`, `parse_month`,
-  sync output rendering.
+  `handle_new`, `handle_delete` (event deletion with confirmation; deletes
+  locally and, for CalDAV events, on the server via `CalDavClient`),
+  `prompt`, `parse_time`, `parse_date`, `parse_month`, sync output rendering.
 - `src/config.rs` — TOML config, default paths, `Config::new`/`write_to`
   (used by `rcal add-account`). `Config::server` is `Option<ServerConfig>`
   (absent for subscription-only setups); `handle_subscribe`/`subscribe.rs`
@@ -59,11 +60,13 @@ cargo test           # run the full suite (unit + mock-server tests)
 - `src/db.rs` — `rusqlite` database. Schema: `calendars` (`id`, `name`,
   `color`, `ctag`, `sync_token`) and `events` (keyed on `uid`, with
   `calendar_id`, `etag`, `ical_data`, `updated_at`, ...). Key types:
-  `StoredEvent { event, etag }`, `Calendar { id, name, color, event_count }`.
+  `StoredEvent { event, etag, calendar_id }`,
+  `Calendar { id, name, color, event_count }`.
 - `src/ical.rs` — parse .ics files/text, export events (`export_ical`,
   RFC 5545 `fold_line`), `parse_ical_datetime`.
 - `src/caldav.rs` — `CalDavClient`, password resolution, PROPFIND discovery,
-  REPORT `calendar-query` fetch, ETag-based sync, PUT push, XML helpers,
+  REPORT `calendar-query` fetch, ETag-based sync, PUT push, DELETE
+  (`delete_event`/`delete_event_by_uid`), XML helpers,
   wiremock-based tests.
 - `src/subscribe.rs` — ICS subscription fetch (`refresh_subscription`),
   full-replace sync logic (`apply_calendar`), scheme validation, tests.
@@ -75,9 +78,15 @@ Key signatures to remember:
 - `upsert_event(...)` — same 4-arg shape
 - `set_sync_metadata(uid, calendar_id, etag, ical_data)`
 - `get_events_for_calendar(calendar_id)` -> `Vec<StoredEvent>`
+- `get_stored_events_for_day(NaiveDate)` -> `Vec<StoredEvent>` (with
+  `calendar_id`/`etag`, used by `rcal delete`)
 - `handle_add_account` in `main.rs` implements `rcal add-account`
   (interactive prompts, `--force` guard, XDG-aware path, preserves existing
   config settings in place). `handle_subscribe` implements `rcal subscribe`.
+- `rcal delete YYYY-MM-DD[@HH:MM]` removes one local event (forced by exact
+  start time when several start that day); CalDAV-synced events are deleted
+  on the server first, subscription-cached events are only removed locally
+  (the feed re-adds them on the next refresh).
 
 Events are keyed only on `uid`; the same UID in two calendars collides in the
 local cache — a known limitation, handle it if the task surfaces it.
@@ -97,7 +106,10 @@ local cache — a known limitation, handle it if the task surfaces it.
 
 ## Unit tests
 
-- 31 tests target: ical parsing/export, db CRUD, caldav XML parsing,
+- 79 tests target: ical parsing/export, db CRUD, caldav XML parsing,
+  caldav DELETE, sync logic (`run_sync` in-memory), subscription
+  logic (`apply_calendar`), delete-selection unit tests, and
+  wiremock end-to-end sync + push + delete tests.
   sync logic (`run_sync` in-memory), and a wiremock end-to-end sync + push
   test (`test_sync_pushes_local_events_against_mock_server`).
 - Run the suite after changes: `cargo test`.
