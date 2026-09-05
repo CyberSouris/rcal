@@ -43,6 +43,9 @@ pub struct DisplayConfig {
     pub time_format: String,
     #[serde(default = "default_color_scheme")]
     pub color_scheme: String,
+    /// `#RRGGBB` color used to accent event summaries in the terminal views.
+    #[serde(default)]
+    pub accent_color: Option<String>,
 }
 
 impl Default for DisplayConfig {
@@ -51,6 +54,7 @@ impl Default for DisplayConfig {
             default_view: default_view(),
             time_format: default_time_format(),
             color_scheme: default_color_scheme(),
+            accent_color: None,
         }
     }
 }
@@ -342,6 +346,36 @@ mod tests {
         let loaded = Config::load_from(&path).unwrap();
         assert!(loaded.server.is_none());
         assert_eq!(loaded.subscriptions.len(), 1);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_accent_color_roundtrip() {
+        let path = temp_config_path();
+        let mut config = Config::new("https://dav.example.com/", "alice", None);
+        // Default: no accent.
+        assert_eq!(config.display.accent_color, None);
+        config.display.accent_color = Some("#3b82f6".to_string());
+        config.write_to(&path).unwrap();
+
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.display.accent_color.as_deref(), Some("#3b82f6"));
+
+        // A config written before accent_color existed (no `accent_color` key)
+        // still parses with None.
+        let content = r#"
+[server]
+url = "https://dav.example.com/"
+username = "alice"
+
+[display]
+default_view = "today"
+time_format = "24h"
+color_scheme = "auto"
+"#;
+        let legacy: Config = toml::from_str(content).unwrap();
+        assert_eq!(legacy.display.accent_color, None);
 
         std::fs::remove_file(&path).ok();
     }

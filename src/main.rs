@@ -371,18 +371,29 @@ async fn main() -> anyhow::Result<()> {
 fn show_day(date: NaiveDate, time: Option<NaiveTime>, details: bool) -> anyhow::Result<()> {
     let db = db::Database::open()?;
     let events = db.get_events_for_day(date)?;
+    let accent = accent_color();
     if let Some(time) = time {
         let event = find_event_at_time(&events, time)
             .ok_or_else(|| anyhow::anyhow!("No event found at {} on {}", time, date))?;
-        print!("{}", display::render_event_details(event));
+        print!("{}", display::render_event_details(event, accent.as_deref()));
         return Ok(());
     }
     if details {
-        print!("{}", display::render_day_details(&events, date));
+        print!("{}", display::render_day_details(&events, date, accent.as_deref()));
     } else {
-        print!("{}", display::render_day(&events, date));
+        print!("{}", display::render_day(&events, date, accent.as_deref()));
     }
     Ok(())
+}
+
+/// The optional `[display] accent_color` (`#RRGGBB`) from the config file,
+/// used to colorize event summaries in the views. `None` when there is no
+/// config file or no color was set.
+fn accent_color() -> Option<String> {
+    config::Config::load()
+        .ok()
+        .and_then(|c| c.display.accent_color)
+        .filter(|c| !c.trim().is_empty())
 }
 
 /// Find the single event that is active at `time` (or, if none is running,
@@ -419,7 +430,7 @@ fn show_week(date: Option<String>, next: bool, agenda: bool) -> anyhow::Result<(
     };
     let start = if next { start + Days::new(7) } else { start };
     let all = db.get_all_events(None, None)?;
-    print!("{}", display::render_week(&all, start, agenda));
+    print!("{}", display::render_week(&all, start, agenda, accent_color().as_deref()));
     Ok(())
 }
 
@@ -437,7 +448,7 @@ fn show_month(month: Option<String>, next: bool) -> anyhow::Result<()> {
         month_date
     };
     let all = db.get_all_events(None, None)?;
-    print!("{}", display::render_month(&all, month_date));
+    print!("{}", display::render_month(&all, month_date, accent_color().as_deref()));
     Ok(())
 }
 
