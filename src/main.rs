@@ -144,6 +144,10 @@ enum Commands {
         /// or just a date when exactly one event starts that day
         target: String,
 
+        /// Restrict to a calendar (name, URL, or "local")
+        #[arg(short = 'c', long)]
+        calendar: Option<String>,
+
         /// Delete without confirmation
         #[arg(short = 'f', long)]
         force: bool,
@@ -347,7 +351,9 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some(Commands::Subscribe { url, name }) => handle_subscribe(&url, name.as_deref()).await,
-        Some(Commands::Delete { target, force }) => handle_delete(&target, force).await,
+        Some(Commands::Delete { target, calendar, force }) => {
+            handle_delete(&target, calendar.as_deref(), force).await
+        }
         Some(Commands::AddAccount {
             url,
             username,
@@ -969,6 +975,48 @@ enum DeleteSelection {
     Ambiguous(Vec<String>),
 }
 
+/// Which calendar a `--calendar` argument restricts deletion to.
+#[derive(Debug)]
+enum DeleteCalendarFilter {
+    None,
+    Local,
+    Calendar { id: String, name: String },
+}
+
+/// Resolve a `rcal delete --calendar` argument against the configured
+/// calendars. Accepts "local" (case-insensitive) for events without a
+/// calendar, or a calendar name/URL. Fails listing the available calendars
+/// when nothing matches.
+fn resolve_delete_calendar(
+    sel: Option<&str>,
+    calendars: &[db::Calendar],
+) -> anyhow::Result<DeleteCalendarFilter> {
+    match sel {
+        None => Ok(DeleteCalendarFilter::None),
+        Some(s) if s.eq_ignore_ascii_case("local") => Ok(DeleteCalendarFilter::Local),
+        Some(s) => {
+            match calendars.iter().find(|c| c.id == s || c.name == s) {
+                Some(c) => Ok(DeleteCalendarFilter::Calendar {
+                    id: c.id.clone(),
+                    name: c.name.clone(),
+                }),
+                None => {
+                    let mut msg =
+                        format!("Unknown calendar '{}'. Available calendars:", s);
+                    for c in calendars {
+                        msg.push_str(&format!(
+                            "\n  - {} ({})",
+                            display::sanitize(&c.name),
+                            display::sanitize(&c.id)
+                        ));
+                    }
+                    anyhow::bail!(msg);
+                }
+            }
+        }
+    }
+}
+
 /// Select the single stored event identified by `date` and, when given, an
 /// exact wall-clock start time. Events are matched on their local start date.
 fn select_event_for_delete(
@@ -1000,33 +1048,51 @@ fn select_event_for_delete(
 /// Handle `rcal delete`: remove an event from the local cache and, when it
 /// belongs to a CalDAV calendar, from the server too. Events cached from an
 /// ICS subscription are only removed locally (the feed re-adds them on the
-/// next refresh).
-async fn handle_delete(target: &str, force: bool) -> anyhow::Result<()> {
+/// next refresh). `calendar` optionally restricts the match to one calendar.
+async fn handle_delete(
+    target: &str,
+    calendar: Option<&str>,
+    force: bool,
+) -> anyhow::Result<()> {
     use std::io::IsTerminal;
 
     let (date, time) = parse_show_arg(target)?;
     let db = db::Database::open()?;
-    let stored = db.get_stored_events_for_day(date)?;
+    let mut stored = db.get_stored_events_for_day(date)?;
+
+    let scope = match resolve_delete_calendar(calendar, &db.get_calendars()?)? {
+        DeleteCalendarFilter::None => String::new(),
+        DeleteCalendarFilter::Local => {
+            stored.retain(|s| s.calendar_id.is_none());
+            " in calendar 'local'".to_string()
+        }
+        DeleteCalendarFilter::Calendar { id, name } => {
+            stored.retain(|s| s.calendar_id.as_deref() == Some(id.as_str()));
+            format!(" in calendar '{}'", name)
+        }
+    };
 
     let index = match select_event_for_delete(&stored, date, time) {
         DeleteSelection::Found(i) => i,
         DeleteSelection::None_ => {
             match time {
-                Some(t) => anyhow::bail!("No event starts at {} on {}", t, date),
-                None => anyhow::bail!("No event starts on {}", date),
+                Some(t) => anyhow::bail!("No event starts at {} on {}{}.", t, date, scope),
+                None => anyhow::bail!("No event starts on {}{}.", date, scope),
             }
         }
         DeleteSelection::Ambiguous(uids) => {
             match time {
                 Some(t) => anyhow::bail!(
-                    "Multiple events start at {} on {}: {}. Use a more precise time.",
+                    "Multiple events start at {} on {}{}: {}. Use a more precise time.",
                     t,
                     date,
+                    scope,
                     uids.join(", ")
                 ),
                 None => anyhow::bail!(
-                    "Multiple events start on {}: {}. Specify an exact start time (YYYY-MM-DD@HH:MM).",
+                    "Multiple events start on {}{}: {}. Specify an exact start time (YYYY-MM-DD@HH:MM) or a calendar to restrict to.",
                     date,
+                    scope,
                     uids.join(", ")
                 ),
             }
@@ -1294,5 +1360,64 @@ mod tests {
             DeleteSelection::Found(i) => assert_eq!(events[i].event.uid, "a"),
             other => panic!("expected Found, got {:?}", other),
         }
+    }
+
+    fn cal(id: &str, name: &str) -> db::Calendar {
+        db::Calendar {
+            id: id.to_string(),
+            name: name.to_string(),
+            color: None,
+            event_count: 0,
+        }
+    }
+
+    #[test]
+    fn test_resolve_delete_calendar_none() {
+        let cals = vec![cal("http://x/work/", "Work")];
+        assert!(matches!(
+            resolve_delete_calendar(None, &cals).unwrap(),
+            DeleteCalendarFilter::None
+        ));
+    }
+
+    #[test]
+    fn test_resolve_delete_calendar_local() {
+        let cals = vec![cal("http://x/work/", "Work")];
+        for sel in ["local", "LOCAL", "Local"] {
+            assert!(matches!(
+                resolve_delete_calendar(Some(sel), &cals).unwrap(),
+                DeleteCalendarFilter::Local
+            ));
+        }
+    }
+
+    #[test]
+    fn test_resolve_delete_calendar_by_name() {
+        let cals = vec![cal("http://x/work/", "Work"), cal("http://x/home/", "Home")];
+        match resolve_delete_calendar(Some("Home"), &cals).unwrap() {
+            DeleteCalendarFilter::Calendar { id, name } => {
+                assert_eq!(id, "http://x/home/");
+                assert_eq!(name, "Home");
+            }
+            other => panic!("expected Calendar, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_resolve_delete_calendar_by_id() {
+        let cals = vec![cal("http://x/work/", "Work")];
+        match resolve_delete_calendar(Some("http://x/work/"), &cals).unwrap() {
+            DeleteCalendarFilter::Calendar { id, .. } => assert_eq!(id, "http://x/work/"),
+            other => panic!("expected Calendar, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_resolve_delete_calendar_unknown_lists_available() {
+        let cals = vec![cal("http://x/work/", "Work")];
+        let err = resolve_delete_calendar(Some("Nope"), &cals).unwrap_err();
+        assert!(err.to_string().contains("Unknown calendar 'Nope'"));
+        assert!(err.to_string().contains("Work"));
+        assert!(err.to_string().contains("http://x/work/"));
     }
 }

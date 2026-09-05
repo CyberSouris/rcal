@@ -84,7 +84,8 @@ Key signatures to remember:
   (interactive prompts, `--force` guard, XDG-aware path, preserves existing
   config settings in place). `handle_subscribe` implements `rcal subscribe`.
 - `rcal delete YYYY-MM-DD[@HH:MM]` removes one local event (forced by exact
-  start time when several start that day); CalDAV-synced events are deleted
+  start time when several start that day); `--calendar NAME|URL|local`
+  restricts the match to one calendar; CalDAV-synced events are deleted
   on the server first, subscription-cached events are only removed locally
   (the feed re-adds them on the next refresh).
 
