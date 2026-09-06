@@ -7,6 +7,7 @@ mod subscribe;
 
 use chrono::{Days, Local, Months, NaiveDate, NaiveTime};
 use clap::{Parser, Subcommand};
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
@@ -370,25 +371,32 @@ async fn main() -> anyhow::Result<()> {
 /// `time` is shown, rendered with full details.
 fn show_day(date: NaiveDate, time: Option<NaiveTime>, details: bool) -> anyhow::Result<()> {
     let db = db::Database::open()?;
-    let events = db.get_events_for_day(date)?;
-    let accent = accent_color();
+    let stored = db.get_stored_events_for_day(date)?;
+    let colored = colored_events(&stored, &calendar_color_map(&db), accent_color().as_deref());
+
     if let Some(time) = time {
-        let event = find_event_at_time(&events, time)
+        let plain: Vec<&ical::CalendarEvent> = colored.iter().map(|c| &c.event).collect();
+        let event = find_event_at_time(&plain, time)
             .ok_or_else(|| anyhow::anyhow!("No event found at {} on {}", time, date))?;
-        print!("{}", display::render_event_details(event, accent.as_deref()));
+        let idx = colored
+            .iter()
+            .position(|c| std::ptr::eq(&c.event, event))
+            .unwrap_or(0);
+        let color = colored[idx].color.clone();
+        print!("{}", display::render_event_details(event, color.as_deref()));
         return Ok(());
     }
     if details {
-        print!("{}", display::render_day_details(&events, date, accent.as_deref()));
+        print!("{}", display::render_day_details(&colored, date));
     } else {
-        print!("{}", display::render_day(&events, date, accent.as_deref()));
+        print!("{}", display::render_day(&colored, date));
     }
     Ok(())
 }
 
-/// The optional `[display] accent_color` (`#RRGGBB`) from the config file,
-/// used to colorize event summaries in the views. `None` when there is no
-/// config file or no color was set.
+/// The optional `[display] accent_color` (`#RRGGBB`) from the config file.
+/// Used as the fallback accent for events whose calendar has no color.
+/// `None` when there is no config file or no color was set.
 fn accent_color() -> Option<String> {
     config::Config::load()
         .ok()
@@ -396,12 +404,46 @@ fn accent_color() -> Option<String> {
         .filter(|c| !c.trim().is_empty())
 }
 
+/// A map of `calendar_id` -> its stored color (`#RRGGBB`), used to accent
+/// each event with the color of the calendar it belongs to.
+fn calendar_color_map(db: &db::Database) -> HashMap<String, Option<String>> {
+    db.get_calendars()
+        .map(|cals| cals.into_iter().map(|c| (c.id, c.color)).collect())
+        .unwrap_or_default()
+}
+
+/// Pair stored events with the accent color their summaries should render
+/// in: the event's calendar color, falling back to the config `accent_color`
+/// when the calendar (or the event itself) has none.
+fn colored_events<'a>(
+    stored: &'a [db::StoredEvent],
+    calendar_colors: &HashMap<String, Option<String>>,
+    fallback: Option<&str>,
+) -> Vec<display::ColoredEvent> {
+    stored
+        .iter()
+        .map(|s| display::ColoredEvent {
+            event: s.event.clone(),
+            color: s
+                .calendar_id
+                .as_deref()
+                .and_then(|id| calendar_colors.get(id).cloned())
+                .flatten()
+                .or_else(|| fallback.map(String::from)),
+        })
+        .collect()
+}
+
 /// Find the single event that is active at `time` (or, if none is running,
 /// the event starting nearest to `time`). All-day events have no time of day
 /// and are never matched.
-fn find_event_at_time(events: &[ical::CalendarEvent], time: NaiveTime) -> Option<&ical::CalendarEvent> {
+fn find_event_at_time<'a>(
+    events: &'a [&ical::CalendarEvent],
+    time: NaiveTime,
+) -> Option<&'a ical::CalendarEvent> {
     let candidates: Vec<(NaiveTime, &ical::CalendarEvent)> = events
         .iter()
+        .copied()
         .filter(|e| !e.all_day)
         .filter_map(|e| {
             let start = e.dtstart?;
@@ -429,8 +471,9 @@ fn show_week(date: Option<String>, next: bool, agenda: bool) -> anyhow::Result<(
         None => Local::now().date_naive(),
     };
     let start = if next { start + Days::new(7) } else { start };
-    let all = db.get_all_events(None, None)?;
-    print!("{}", display::render_week(&all, start, agenda, accent_color().as_deref()));
+    let all = db.get_all_stored_events(None, None)?;
+    let colored = colored_events(&all, &calendar_color_map(&db), accent_color().as_deref());
+    print!("{}", display::render_week(&colored, start, agenda));
     Ok(())
 }
 
@@ -447,8 +490,9 @@ fn show_month(month: Option<String>, next: bool) -> anyhow::Result<()> {
     } else {
         month_date
     };
-    let all = db.get_all_events(None, None)?;
-    print!("{}", display::render_month(&all, month_date, accent_color().as_deref()));
+    let all = db.get_all_stored_events(None, None)?;
+    let colored = colored_events(&all, &calendar_color_map(&db), accent_color().as_deref());
+    print!("{}", display::render_month(&colored, month_date));
     Ok(())
 }
 

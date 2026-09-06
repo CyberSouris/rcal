@@ -298,36 +298,6 @@ impl Database {
         Ok(count > 0)
     }
 
-    /// Get all events in a date range [start, end)
-    pub fn get_events_in_range(
-        &self,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
-    ) -> Result<Vec<CalendarEvent>> {
-        let start_str = start.to_rfc3339();
-        let end_str = end.to_rfc3339();
-
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT uid, summary, description, location, url,
-                        dtstart, dtend, all_day, status, recurrence
-                 FROM events
-                 WHERE dtstart IS NOT NULL
-                   AND ((dtstart >= ?1 AND dtstart < ?2)
-                        OR (dtend > ?1 AND dtend <= ?2)
-                        OR (dtstart <= ?1 AND dtend >= ?2))
-                 ORDER BY dtstart",
-            )?;
-
-        let rows = stmt.query_map(params![start_str, end_str], map_event_row)?;
-
-        let events: Vec<CalendarEvent> = rows.collect::<rusqlite::Result<Vec<_>>>()
-            .context("Failed to fetch events")?;
-
-        Ok(events)
-    }
-
     /// Get all events (optionally filtered by a date range)
     pub fn get_all_events(&self, from: Option<DateTime<Utc>>, to: Option<DateTime<Utc>>) -> Result<Vec<CalendarEvent>> {
         let mut sql = String::from(
@@ -357,6 +327,49 @@ impl Database {
             .context("Failed to fetch events")?;
 
         Ok(events)
+    }
+
+    /// Get all stored events (optionally filtered by a date range), including
+    /// each event's sync metadata (`etag`, `calendar_id`).
+    pub fn get_all_stored_events(
+        &self,
+        from: Option<DateTime<Utc>>,
+        to: Option<DateTime<Utc>>,
+    ) -> Result<Vec<StoredEvent>> {
+        let mut sql = String::from(
+            "SELECT uid, summary, description, location, url,
+                    dtstart, dtend, all_day, status, recurrence,
+                    etag, calendar_id
+             FROM events
+             WHERE dtstart IS NOT NULL",
+        );
+        let mut query_params: Vec<String> = Vec::new();
+
+        if let Some(from) = from {
+            sql.push_str(" AND dtstart >= ?");
+            query_params.push(from.to_rfc3339());
+        }
+        if let Some(to) = to {
+            sql.push_str(" AND dtstart <= ?");
+            query_params.push(to.to_rfc3339());
+        }
+        sql.push_str(" ORDER BY dtstart");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+
+        let refs: Vec<&str> = query_params.iter().map(|s| s.as_str()).collect();
+        let rows = stmt.query_map(rusqlite::params_from_iter(refs), |row| {
+            let etag: Option<String> = row.get(10)?;
+            let calendar_id: Option<String> = row.get(11)?;
+            Ok(StoredEvent {
+                event: event_stub_from_row(row),
+                etag,
+                calendar_id,
+            })
+        })?;
+
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("Failed to fetch stored events")
     }
 
     /// Find events that overlap with a given time range, excluding events with a given UID
@@ -550,21 +563,6 @@ pub struct Calendar {
 /// Convert all-day datetime handling for range queries.
 /// All-day events use midnight UTC of their dates.
 impl Database {
-    /// Load all events for a specific day
-    pub fn get_events_for_day(&self, date: chrono::NaiveDate) -> Result<Vec<CalendarEvent>> {
-        // The day's window is the user's local midnight spanning 24 hours,
-        // converted to UTC so timed events stored as UTC instants match the
-        // local calendar day.
-        let start = chrono::Local
-            .with_ymd_and_hms(date.year(), date.month(), date.day(), 0, 0, 0)
-            .single()
-            .unwrap()
-            .with_timezone(&Utc);
-        let end = start + chrono::Duration::days(1);
-
-        self.get_events_in_range(start, end)
-    }
-
     /// Load all events for a specific day together with their calendar and
     /// sync metadata, so a caller can tell a local event from one synced to a
     /// CalDAV server or an ICS subscription.
@@ -661,76 +659,6 @@ mod tests {
             events[0].status.as_deref(),
             Some("CONFIRMED")
         );
-    }
-
-    #[test]
-    fn test_get_events_for_day() {
-        let db = test_db();
-        // Events are stored as UTC instants; build them from local wall-clock
-        // times so the local-day window contains the right one on any host.
-        let morning = chrono::Local
-            .with_ymd_and_hms(2024, 1, 15, 9, 0, 0)
-            .single()
-            .unwrap();
-        let next_day = chrono::Local
-            .with_ymd_and_hms(2024, 1, 16, 9, 0, 0)
-            .single()
-            .unwrap();
-        db.insert_event(
-            &event(
-                "uid-1",
-                "Morning",
-                morning.with_timezone(&Utc),
-                (morning + chrono::Duration::hours(1)).with_timezone(&Utc),
-            ),
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        db.insert_event(
-            &event(
-                "uid-2",
-                "Next Day",
-                next_day.with_timezone(&Utc),
-                (next_day + chrono::Duration::hours(1)).with_timezone(&Utc),
-            ),
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-
-        let jan_15 = chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
-        let events = db.get_events_for_day(jan_15).unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].summary, "Morning");
-    }
-
-    #[test]
-    fn test_get_events_in_range_includes_spanning_events() {
-        let db = test_db();
-        // Event spanning multiple days (20:00 to 02:00 next day)
-        db.insert_event(
-            &event("uid-span", "Night Shift", dt(2024, 1, 15, 20, 0), dt(2024, 1, 16, 2, 0)),
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-
-        // Query for the second day only - spanning event should still appear
-        let start = dt(2024, 1, 16, 0, 0);
-        let end = dt(2024, 1, 17, 0, 0);
-        let events = db.get_events_in_range(start, end).unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].uid, "uid-span");
-
-        // Query for the first day - should also appear
-        let start = dt(2024, 1, 15, 0, 0);
-        let end = dt(2024, 1, 16, 0, 0);
-        let events = db.get_events_in_range(start, end).unwrap();
-        assert_eq!(events.len(), 1);
     }
 
     #[test]

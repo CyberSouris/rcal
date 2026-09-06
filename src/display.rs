@@ -17,6 +17,23 @@ pub fn sanitize_multiline(s: &str) -> String {
         .collect()
 }
 
+/// A calendar event together with the `#RRGGBB` accent color its summaries
+/// should be rendered in. The color is the event's calendar color, or a
+/// fallback (e.g. the `[display] accent_color`) for events whose calendar
+/// has none.
+#[derive(Debug, Clone)]
+pub struct ColoredEvent {
+    pub event: CalendarEvent,
+    pub color: Option<String>,
+}
+
+impl std::ops::Deref for ColoredEvent {
+    type Target = CalendarEvent;
+    fn deref(&self) -> &Self::Target {
+        &self.event
+    }
+}
+
 /// Wrap `text` in an ANSI 24-bit foreground-color escape sequence using the
 /// given `#RRGGBB` accent color. When `hex` is `None` or not parseable the
 /// text is returned unchanged, so callers get graceful fallback for free.
@@ -66,7 +83,7 @@ fn pad_to_width(text: &str, width: usize) -> String {
 }
 
 /// Format a day view (like Today or Show <date>)
-pub fn render_day(events: &[CalendarEvent], date: NaiveDate, accent_color: Option<&str>) -> String {
+pub fn render_day(events: &[ColoredEvent], date: NaiveDate) -> String {
     let today = Local::now().date_naive();
     let is_today = date == today;
 
@@ -84,9 +101,9 @@ pub fn render_day(events: &[CalendarEvent], date: NaiveDate, accent_color: Optio
     output.push_str("\n\n");
 
     // Filter events for this day
-    let mut day_events: Vec<&CalendarEvent> = events
+    let mut day_events: Vec<&ColoredEvent> = events
         .iter()
-        .filter(|e| event_on_date(e, date))
+        .filter(|e| event_on_date(&e.event, date))
         .collect();
 
     day_events.sort_by(|a, b| a.dtstart.cmp(&b.dtstart));
@@ -97,11 +114,11 @@ pub fn render_day(events: &[CalendarEvent], date: NaiveDate, accent_color: Optio
     }
 
     for event in day_events {
-        let time_str = format_event_time(event);
+        let time_str = format_event_time(&event.event);
         output.push_str(&format!(
             "  {:<22} {}\n",
             time_str,
-            colorize(&sanitize(&event.summary), accent_color)
+            colorize(&sanitize(&event.summary), event.color.as_deref())
         ));
 
         if let Some(location) = &event.location {
@@ -113,11 +130,7 @@ pub fn render_day(events: &[CalendarEvent], date: NaiveDate, accent_color: Optio
 }
 
 /// Format a day view where each event is expanded to its full details
-pub fn render_day_details(
-    events: &[CalendarEvent],
-    date: NaiveDate,
-    accent_color: Option<&str>,
-) -> String {
+pub fn render_day_details(events: &[ColoredEvent], date: NaiveDate) -> String {
     let today = Local::now().date_naive();
     let is_today = date == today;
 
@@ -134,9 +147,9 @@ pub fn render_day_details(
     output.push_str(&"=".repeat(title.len()));
     output.push_str("\n\n");
 
-    let mut day_events: Vec<&CalendarEvent> = events
+    let mut day_events: Vec<&ColoredEvent> = events
         .iter()
-        .filter(|e| event_on_date(e, date))
+        .filter(|e| event_on_date(&e.event, date))
         .collect();
 
     day_events.sort_by(|a, b| a.dtstart.cmp(&b.dtstart));
@@ -150,7 +163,7 @@ pub fn render_day_details(
         if i > 0 {
             output.push_str("\n");
         }
-        output.push_str(&render_event_details(event, accent_color));
+        output.push_str(&render_event_details(&event.event, event.color.as_deref()));
     }
     output.push_str("\n");
 
@@ -158,7 +171,7 @@ pub fn render_day_details(
 }
 
 /// Render every field of a single event as a labelled block
-pub fn render_event_details(event: &CalendarEvent, accent_color: Option<&str>) -> String {
+pub fn render_event_details(event: &CalendarEvent, color: Option<&str>) -> String {
     let mut output = String::new();
 
     let status = event
@@ -168,7 +181,7 @@ pub fn render_event_details(event: &CalendarEvent, accent_color: Option<&str>) -
         .unwrap_or_default();
     output.push_str(&format!(
         "{}{}\n",
-        colorize(&sanitize(&event.summary), accent_color),
+        colorize(&sanitize(&event.summary), color),
         status
     ));
     output.push_str(&format!("{}\n", "-".repeat(40)));
@@ -210,12 +223,7 @@ pub fn render_event_details(event: &CalendarEvent, accent_color: Option<&str>) -
 /// Format a week view (Monday-Sunday). Events are laid out in a grid with
 /// one column per day. When `agenda` is set, the full per-day listing is
 /// appended underneath.
-pub fn render_week(
-    events: &[CalendarEvent],
-    start_date: NaiveDate,
-    agenda: bool,
-    accent_color: Option<&str>,
-) -> String {
+pub fn render_week(events: &[ColoredEvent], start_date: NaiveDate, agenda: bool) -> String {
     // Normalize to Monday
     let monday = start_date - Days::new(start_date.weekday().num_days_from_monday() as u64);
     let sunday = monday + Days::new(6);
@@ -263,7 +271,7 @@ pub fn render_week(
     // Each event that falls in this week spans the days it occurs on.
     let days: Vec<NaiveDate> = (0..7).map(|i| monday + Days::new(i)).collect();
     struct Placed<'a> {
-        event: &'a CalendarEvent,
+        event: &'a ColoredEvent,
         first_day: usize,
         last_day: usize,
     }
@@ -273,7 +281,7 @@ pub fn render_week(
             let span: Vec<usize> = days
                 .iter()
                 .enumerate()
-                .filter(|(_, d)| event_on_date(e, **d))
+                .filter(|(_, d)| event_on_date(&e.event, **d))
                 .map(|(i, _)| i)
                 .collect();
             match (span.first(), span.last()) {
@@ -343,8 +351,14 @@ pub fn render_week(
     for row in &rows {
         // Wrap each cell's text into up to MAX_LINES physical rows.
         let mut columns: Vec<Vec<String>> = Vec::with_capacity(7);
+        let mut column_colors: Vec<Option<String>> = Vec::with_capacity(7);
         let mut height = 1usize;
         for (d, cell) in row.iter().enumerate() {
+            column_colors.push(
+                cell.as_ref()
+                    .map(|idx| placed[*idx].event.color.clone())
+                    .flatten(),
+            );
             let text = match cell {
                 Some(idx) => {
                     let p = &placed[*idx];
@@ -381,7 +395,10 @@ pub fn render_week(
                 let cell = if cell_line.trim().is_empty() {
                     " ".repeat(COL_WIDTH)
                 } else {
-                    pad_to_width(&colorize(cell_line, accent_color), COL_WIDTH)
+                    pad_to_width(
+                        &colorize(cell_line, column_colors[d].as_deref()),
+                        COL_WIDTH,
+                    )
                 };
                 line.push_str(&cell);
             }
@@ -397,9 +414,9 @@ pub fn render_week(
     // Detailed day-by-day listing
     for i in 0..7 {
         let day = monday + Days::new(i);
-        let day_events: Vec<&CalendarEvent> = events
+        let day_events: Vec<&ColoredEvent> = events
             .iter()
-            .filter(|e| event_on_date(e, day))
+            .filter(|e| event_on_date(&e.event, day))
             .collect();
         if day_events.is_empty() {
             continue;
@@ -413,14 +430,14 @@ pub fn render_week(
         output.push_str(&"-".repeat(day_label.len()));
         output.push_str("\n");
 
-        let mut sorted: Vec<&CalendarEvent> = day_events;
+        let mut sorted: Vec<&ColoredEvent> = day_events;
         sorted.sort_by(|a, b| a.dtstart.cmp(&b.dtstart));
         for event in sorted {
-            let time_str = format_event_time(event);
+            let time_str = format_event_time(&event.event);
             output.push_str(&format!(
                 "  {:<22} {}\n",
                 time_str,
-                colorize(&sanitize(&event.summary), accent_color)
+                colorize(&sanitize(&event.summary), event.color.as_deref())
             ));
 
             if let Some(location) = &event.location {
@@ -491,7 +508,7 @@ fn wrap_cell(text: &str, width: usize, max_lines: usize) -> Vec<String> {
 }
 
 /// Format a month view (calendar grid)
-pub fn render_month(events: &[CalendarEvent], month: NaiveDate, accent_color: Option<&str>) -> String {
+pub fn render_month(events: &[ColoredEvent], month: NaiveDate) -> String {
     let year = month.year();
     let month_num = month.month();
 
@@ -521,12 +538,15 @@ pub fn render_month(events: &[CalendarEvent], month: NaiveDate, accent_color: Op
         "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
     ));
 
-    // Group events by day for markers
-    let mut events_by_day: HashMap<u32, usize> = HashMap::new();
+    // Group events by day, keeping each event's accent color for the markers
+    let mut events_by_day: HashMap<u32, Vec<Option<String>>> = HashMap::new();
     for event in events {
-        if let Some(event_date) = event_date(event) {
+        if let Some(event_date) = event_date(&event.event) {
             if event_date.year() == year && event_date.month() == month_num {
-                *events_by_day.entry(event_date.day()).or_insert(0) += 1;
+                events_by_day
+                    .entry(event_date.day())
+                    .or_default()
+                    .push(event.color.clone());
             }
         }
     }
@@ -551,8 +571,7 @@ pub fn render_month(events: &[CalendarEvent], month: NaiveDate, accent_color: Op
         let cell = format_cell(
             day_number,
             is_today,
-            events_by_day.get(&day_number).copied(),
-            accent_color,
+            events_by_day.get(&day_number).map(Vec::as_slice).unwrap_or(&[]),
         );
         row.push_str(&cell);
     }
@@ -568,18 +587,15 @@ pub fn render_month(events: &[CalendarEvent], month: NaiveDate, accent_color: Op
     output
 }
 
-/// Format a single cell in the month view. Event markers are colored with the
-/// accent color when one is configured.
-fn format_cell(
-    day: u32,
-    is_today: bool,
-    count: Option<usize>,
-    accent_color: Option<&str>,
-) -> String {
+/// Format a single cell in the month view. Each event marker dot is colored
+/// with its event's accent color (plain when the event has none).
+fn format_cell(day: u32, is_today: bool, colors: &[Option<String>]) -> String {
     let day_str = day.to_string();
-    let markers = count
-        .map(|c| colorize(&"●".repeat(c.min(3)), accent_color))
-        .unwrap_or_default();
+    let markers: String = colors
+        .iter()
+        .take(3)
+        .map(|c| colorize("●", c.as_deref()))
+        .collect();
 
     let content = if is_today {
         format!("[{}]{}", day_str, markers)
@@ -702,6 +718,18 @@ mod tests {
         }
     }
 
+    /// Wrap events with an accent color for the renderers under test.
+    /// `None` simulates events with no calendar color and no config fallback.
+    fn colored(events: Vec<CalendarEvent>, color: Option<&str>) -> Vec<ColoredEvent> {
+        events
+            .into_iter()
+            .map(|event| ColoredEvent {
+                event,
+                color: color.map(String::from),
+            })
+            .collect()
+    }
+
     #[test]
     fn test_render_day_with_events() {
         let date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
@@ -709,7 +737,7 @@ mod tests {
         let end = start + chrono::Duration::hours(1);
         let events = vec![local_event("Meeting", start, end)];
 
-        let output = render_day(&events, date, None);
+        let output = render_day(&colored(events, None), date);
         assert!(output.contains("Meeting"));
         // The event is created at 09:00 local, so it renders as 09:00
         // regardless of the host timezone.
@@ -719,7 +747,7 @@ mod tests {
     #[test]
     fn test_render_day_empty() {
         let date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
-        let output = render_day(&[], date, None);
+        let output = render_day(&[], date);
         assert!(output.contains("No events"));
     }
 
@@ -730,7 +758,7 @@ mod tests {
         let end = start + chrono::Duration::hours(1);
         let events = vec![local_event("Meeting", start, end)];
 
-        let output = render_week(&events, monday, false, None);
+        let output = render_week(&colored(events, None), monday, false);
         assert!(output.contains("Week 3"));
         assert!(output.contains("Meeting"));
         // Grid mode does not show the detailed day listing.
@@ -744,7 +772,7 @@ mod tests {
         let end = start + chrono::Duration::hours(1);
         let events = vec![local_event("Meeting", start, end)];
 
-        let output = render_week(&events, monday, true, None);
+        let output = render_week(&colored(events, None), monday, true);
         assert!(output.contains("Meeting"));
         // Agenda mode appends the detailed per-day listing.
         assert!(output.contains("January 15"));
@@ -762,7 +790,7 @@ mod tests {
             events.push(local_event(&format!("Event-{}", i), start, end));
         }
 
-        let output = render_week(&events, monday, false, None);
+        let output = render_week(&colored(events, None), monday, false);
         // Every day header appears; today is highlighted.
         assert!(output.contains("Mon 15"));
         assert!(output.contains("Sun 21"));
@@ -782,7 +810,7 @@ mod tests {
         let long = "08:00 Enterprise Architecture Design Review Workshop";
         let events = vec![local_event(long, start, end)];
 
-        let output = render_week(&events, monday, false, None);
+        let output = render_week(&colored(events, None), monday, false);
         // Wrapped across multiple physical lines within the column.
         assert!(output.contains("Enterprise"));
         assert!(output.contains("Architecture"));
@@ -803,7 +831,7 @@ mod tests {
             local_event("Review", start2, end2),
         ];
 
-        let output = render_week(&events, monday, false, None);
+        let output = render_week(&colored(events, None), monday, false);
         let lines: Vec<&str> = output.lines().collect();
         let i1 = lines.iter().position(|l| l.contains("Standup")).unwrap();
         let i2 = lines.iter().position(|l| l.contains("Review")).unwrap();
@@ -830,7 +858,7 @@ mod tests {
             local_event("Brief", start2, end2),
         ];
 
-        let output = render_week(&events, monday, false, None);
+        let output = render_week(&colored(events, None), monday, false);
         let lines: Vec<&str> = output.lines().collect();
         let i1 = lines.iter().position(|l| l.contains("Standup")).unwrap();
         let i2 = lines.iter().position(|l| l.contains("Brief")).unwrap();
@@ -850,7 +878,7 @@ mod tests {
             local_event("Brief", start2, end2),
         ];
 
-        let output = render_week(&events, monday, false, None);
+        let output = render_week(&colored(events, None), monday, false);
         let lines: Vec<&str> = output.lines().collect();
         let i1 = lines.iter().position(|l| l.contains("LongCall")).unwrap();
         let i2 = lines.iter().position(|l| l.contains("Brief")).unwrap();
@@ -869,7 +897,7 @@ mod tests {
             local_event("Wednesday", start2, end2),
         ];
 
-        let output = render_week(&events, monday, false, None);
+        let output = render_week(&colored(events, None), monday, false);
         let lines: Vec<&str> = output.lines().collect();
         let i1 = lines.iter().position(|l| l.contains("Monday")).unwrap();
         let i2 = lines.iter().position(|l| l.contains("Wednesday")).unwrap();
@@ -914,7 +942,7 @@ mod tests {
         let end = start + chrono::Duration::hours(1);
         let events = vec![local_event("Meeting", start, end)];
 
-        let output = render_month(&events, month, None);
+        let output = render_month(&colored(events, None), month);
         assert!(output.contains("January"));
         assert!(output.contains("2024"));
     }
@@ -931,7 +959,7 @@ mod tests {
         event.status = Some("CONFIRMED".to_string());
         let events = vec![event];
 
-        let output = render_day_details(&events, date, None);
+        let output = render_day_details(&colored(events, None), date);
         assert!(output.contains("Monday, January 15, 2024"));
         assert!(output.contains("[CONFIRMED]"));
         assert!(output.contains("09:00"));
@@ -1016,13 +1044,13 @@ mod tests {
         let end = start + chrono::Duration::hours(1);
         let events = vec![local_event("Meeting", start, end)];
 
-        let output = render_day(&events, date, Some("#ff8800"));
+        let output = render_day(&colored(events.clone(), Some("#ff8800")), date);
         assert!(output.contains("\x1b[38;2;255;136;0mMeeting\x1b[0m"));
         // The time column stays uncolored.
         assert!(output.contains("09:00 - 10:00"));
         assert!(output.contains("09:00 - 10:00          "));
         // Without an accent there are no escape sequences.
-        assert!(!render_day(&events, date, None).contains('\x1b'));
+        assert!(!render_day(&colored(events, None), date).contains('\x1b'));
     }
 
     #[test]
@@ -1043,18 +1071,18 @@ mod tests {
         let end = start + chrono::Duration::hours(1);
         let events = vec![local_event("Meeting", start, end)];
 
-        let grid = render_week(&events, monday, false, Some("#ff8800"));
+        let grid = render_week(&colored(events.clone(), Some("#ff8800")), monday, false);
         assert!(grid.contains("\x1b[38;2;255;136;0m"));
         // Grid alignment is preserved despite the escape sequences.
         for line in grid.lines().filter(|l| l.contains("10:00 Meeting")) {
             assert_eq!(visible_width(line.trim_end()), line.trim_end().chars().count());
         }
 
-        let agenda = render_week(&events, monday, true, Some("#ff8800"));
+        let agenda = render_week(&colored(events.clone(), Some("#ff8800")), monday, true);
         assert!(agenda.contains("\x1b[38;2;255;136;0mMeeting\x1b[0m"));
 
-        assert!(!render_week(&events, monday, false, None).contains('\x1b'));
-        assert!(!render_week(&events, monday, true, None).contains('\x1b'));
+        assert!(!render_week(&colored(events.clone(), None), monday, false).contains('\x1b'));
+        assert!(!render_week(&colored(events, None), monday, true).contains('\x1b'));
     }
 
     #[test]
@@ -1064,8 +1092,8 @@ mod tests {
         let end = start + chrono::Duration::hours(1);
         let events = vec![local_event("Meeting", start, end)];
 
-        let output = render_month(&events, month, Some("#ff8800"));
+        let output = render_month(&colored(events.clone(), Some("#ff8800")), month);
         assert!(output.contains("\x1b[38;2;255;136;0m●\x1b[0m"));
-        assert!(!render_month(&events, month, None).contains('\x1b'));
+        assert!(!render_month(&colored(events, None), month).contains('\x1b'));
     }
 }
