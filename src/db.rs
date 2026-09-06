@@ -6,6 +6,13 @@ use std::path::Path;
 use crate::config::Config;
 use crate::ical::CalendarEvent;
 
+/// Distinct palette from which calendars without their own color draw a
+/// default. Colors are persisted to `calendars.color` on insert.
+const CALENDAR_COLORS: [&str; 12] = [
+    "#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4", "#42d4f4",
+    "#f032e6", "#9a6324", "#808000", "#469990", "#aaffc3", "#ffe119",
+];
+
 /// Raw event row as stored in the database, including sync metadata
 #[derive(Debug)]
 pub struct StoredEvent {
@@ -215,14 +222,61 @@ impl Database {
 
     // --- Calendar operations ---
 
-    /// Insert a calendar
+    /// Insert a calendar. When `color` is `None` (the server or subscription
+    /// has no color of its own), a random palette color not already in use by
+    /// another calendar is chosen and persisted, so every calendar defaults
+    /// to a distinct accent. Re-inserting a calendar keeps its previously
+    /// assigned color; an explicit color always wins.
     pub fn insert_calendar(&self, id: &str, name: &str, color: Option<&str>) -> Result<()> {
+        let color = match color {
+            Some(c) => Some(c.to_string()),
+            None => {
+                let existing: Option<String> = self
+                    .conn
+                    .query_row(
+                        "SELECT color FROM calendars WHERE id = ?1",
+                        params![id],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(None);
+                match existing {
+                    Some(c) if !c.is_empty() => Some(c),
+                    _ => Some(self.unused_calendar_color()?),
+                }
+            }
+        };
         self.conn.execute(
             "INSERT OR REPLACE INTO calendars (id, name, color)
              VALUES (?1, ?2, ?3)",
             params![id, name, color],
         )?;
         Ok(())
+    }
+
+    /// The first palette color not yet assigned to any calendar, so re-runs
+    /// pick a different starting point. Falls back to a palette color when
+    /// every one is already in use by some calendar.
+    fn unused_calendar_color(&self) -> Result<String> {
+        let mut used: Vec<String> = Vec::new();
+        let mut stmt = self.conn.prepare(
+            "SELECT color FROM calendars WHERE color IS NOT NULL AND color != ''",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for row in rows {
+            used.push(row?);
+        }
+
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as usize)
+            .unwrap_or(0);
+        for i in 0..CALENDAR_COLORS.len() {
+            let color = CALENDAR_COLORS[(seed + i) % CALENDAR_COLORS.len()];
+            if !used.iter().any(|u| u == color) {
+                return Ok(color.to_string());
+            }
+        }
+        Ok(CALENDAR_COLORS[seed % CALENDAR_COLORS.len()].to_string())
     }
 
     /// Get all calendars
@@ -908,6 +962,50 @@ mod tests {
         let calendars = db.get_calendars().unwrap();
         assert_eq!(calendars.len(), 1);
         assert_eq!(calendars[0].name, "Personal Updated");
+    }
+
+    #[test]
+    fn test_insert_calendar_assigns_distinct_colors_by_default() {
+        let db = test_db();
+        for (id, name) in [
+            ("cal-a", "Alpha"),
+            ("cal-b", "Bravo"),
+            ("cal-c", "Gamma"),
+            ("cal-d", "Delta"),
+        ] {
+            db.insert_calendar(id, name, None).unwrap();
+        }
+
+        let cals = db.get_calendars().unwrap();
+        assert_eq!(cals.len(), 4);
+        let mut seen = std::collections::HashSet::new();
+        for c in &cals {
+            let color = c.color.as_deref().expect("default color assigned");
+            assert!(color.starts_with('#'), "expected #RRGGBB, got {color}");
+            assert!(
+                seen.insert(color.to_string()),
+                "every calendar must get a distinct default color"
+            );
+        }
+    }
+
+    #[test]
+    fn test_insert_calendar_keeps_assigned_default_color() {
+        let db = test_db();
+        db.insert_calendar("cal-a", "Alpha", None).unwrap();
+        let first = db.get_calendars().unwrap()[0].color.clone();
+
+        // Re-inserting without a color (e.g. on the next sync, when the
+        // server still has no color) must not churn the assigned color.
+        db.insert_calendar("cal-a", "Alpha renamed", None).unwrap();
+        let cals = db.get_calendars().unwrap();
+        assert_eq!(cals[0].name, "Alpha renamed");
+        assert_eq!(cals[0].color, first);
+
+        // An explicit color always wins over the assigned default.
+        db.insert_calendar("cal-a", "Alpha", Some("#123456")).unwrap();
+        let cals = db.get_calendars().unwrap();
+        assert_eq!(cals[0].color.as_deref(), Some("#123456"));
     }
 
     #[test]
