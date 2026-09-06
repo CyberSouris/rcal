@@ -70,7 +70,9 @@ cargo test           # run the full suite (unit + mock-server tests)
   wiremock-based tests.
 - `src/subscribe.rs` — ICS subscription fetch (`refresh_subscription`),
   full-replace sync logic (`apply_calendar`), scheme validation, tests.
-- `src/display.rs` — day/week/month renderers.
+- `src/display.rs` — day/week/month renderers; `colorize` / `pad_to_width`
+  utilities for ANSI 24-bit foreground accent coloring (from
+  `[display] accent_color` in the config file).
 
 Key signatures to remember:
 
