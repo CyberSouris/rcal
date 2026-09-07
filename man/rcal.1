@@ -9,12 +9,16 @@ rcal \- CLI calendar tool with CalDAV synchronization
 is a command-line calendar tool. It keeps an offline SQLite cache of your
 events, displays day, week and month views, imports iCal (.ics) files, and
 synchronizes bidirectionally with a CalDAV server (for example Radicale,
-DAViCal, or Nextcloud Calendar).
+DAViCal, or Nextcloud Calendar). Read-only online ICS calendar feeds can be
+pulled in with
+.B subscribe
+and are refreshed during
+.BR sync .
 .PP
 Use
 .B sync
 for calendar work; first run
-.B init
+.B add-account
 to create a config file (or write one by hand; see CONFIGURATION).
 .SH GLOBAL OPTIONS
 .TP
@@ -28,34 +32,16 @@ Print version information.
 .B today
 Show today's events.
 .TP
-.B init
-Create a config file at the default location for CalDAV synchronization.
-When run interactively (a TTY), the server URL, username and optional
-password command are prompted for. When run non-interactively,
-.B \-\-url
-and
-.B \-\-username
-are required. Refuses to overwrite an existing config unless
-.B \-\-force
-(or explicit interactive confirmation) is given.
-.TP
-.RS
-.IP "\fB\-u, \-\-url\fR \fIURL\fR"
-CalDAV server URL.
-.IP "\fB\-\-username\fR \fIUSERNAME\fR"
-CalDAV username.
-.IP "\fB\-\-password-command\fR \fICOMMAND\fR"
-Shell command whose stdout is the password.
-.IP "\fB\-f, \-\-force\fR"
-Overwrite an existing config file.
-.RE
-.TP
 .B week
 Show an overview of the week containing the given date, or the current week.
 .TP
 .RS
 .IP "\fB\-d, \-\-date\fR \fIDATE\fR"
-Start date (\fIYYYY\-MM\-DD\fR); defaults to the current week.
+Start date (\fIYYYY\-MM\-DD\fR); defaults to Monday of the current week.
+.IP "\fB\-\-next\fR"
+Show the next week.
+.IP "\fB\-\-agenda\fR (synonym: \fB\-\-details\fR)"
+Append a full day-by-day listing below the event grid.
 .RE
 .TP
 .B month
@@ -64,14 +50,20 @@ Show an overview of the given month, or the current month.
 .RS
 .IP "\fB\-m, \-\-month\fR \fIMONTH\fR"
 Month (\fIYYYY\-MM\fR); defaults to the current month.
+.IP "\fB\-\-next\fR"
+Show the next month.
 .RE
 .TP
 .B show
-Show events for a specific date.
+Show events for a specific date. To inspect a single event in full detail,
+append a start time.
 .TP
 .RS
 .IP "\fBDATE\fR"
-Date to show (\fIYYYY\-MM\-DD\fR).
+Date to show (\fIYYYY\-MM\-DD\fR, or \fIYYYY\-MM\-DD@HH:MM\fR to render the
+details of the single event active at that time).
+.IP "\fB\-\-details\fR"
+Show all details of each event on the date.
 .RE
 .TP
 .B import
@@ -89,9 +81,10 @@ Preview only; do not modify the database.
 .TP
 .B sync
 Synchronize with the CalDAV server configured in the config file. Discovers
-calendars, pulls changes (adds, updates, deletions), and pushes locally
-created events with an HTTP PUT. Prints per-calendar and total counts of
-added, updated, unchanged, deleted and pushed events.
+calendars, pulls changes (adds, updates, deletions), pushes locally
+created events with an HTTP PUT, and refreshes any ICS subscriptions.
+Prints per-calendar and total counts of added, updated, unchanged, deleted
+and pushed events.
 .TP
 .B new
 Create a new event. When run interactively (a TTY), missing values are
@@ -130,8 +123,59 @@ Lower bound of the date range (\fIYYYY\-MM\-DD\fR).
 Upper bound of the date range (\fIYYYY\-MM\-DD\fR).
 .RE
 .TP
+.B delete
+Delete an event locally and, for CalDAV-synced events, on the server.
+CalDAV events are removed from the server first; events cached from an ICS
+subscription are only removed locally (the feed re-adds them on the next
+refresh).
+.TP
+.RS
+.IP "\fBTARGET\fR"
+The event to delete: \fIYYYY\-MM\-DD@HH:MM\fR for the event starting at that
+time on that date, or just \fIYYYY\-MM\-DD\fR when exactly one event starts
+that day.
+.IP "\fB\-c, \-\-calendar\fR \fICALENDAR\fR"
+Restrict the match to one calendar (name, URL, or the literal
+.BR local ).
+.IP "\fB\-f, \-\-force\fR"
+Delete without confirmation.
+.RE
+.TP
 .B calendars
 List available calendars with their color swatches and event counts.
+.TP
+.B subscribe
+Subscribe to an online ICS calendar feed and cache it locally, so its events
+appear in the views. No CalDAV account is required.
+.TP
+.RS
+.IP "\fBURL\fR"
+URL of the .ics feed.
+.IP "\fB\-\-name\fR \fINAME\fR"
+Display name for the subscription (defaults to the feed host).
+.RE
+.TP
+.B add-account
+Add a CalDAV account by creating a config file at the default location.
+When run interactively (a TTY), the server URL, username and optional
+password command are prompted for. When run non-interactively,
+.B \-\-url
+and
+.B \-\-username
+are required. Refuses to overwrite an existing config unless
+.B \-\-force
+(or explicit interactive confirmation) is given.
+.TP
+.RS
+.IP "\fB\-u, \-\-url\fR \fIURL\fR"
+CalDAV server URL.
+.IP "\fB\-\-username\fR \fIUSERNAME\fR"
+CalDAV username.
+.IP "\fB\-\-password-command\fR \fICOMMAND\fR"
+Shell command whose stdout is the password.
+.IP "\fB\-f, \-\-force\fR"
+Overwrite an existing config file.
+.RE
 .SH CONFIGURATION
 .B rcal
 reads a TOML configuration file. By default it looks in
@@ -139,8 +183,13 @@ reads a TOML configuration file. By default it looks in
 or (when that variable is unset)
 .IR ~/.config/rcal/config.toml .
 Create it with
-.B "rcal init"
-(see COMMANDS) or by hand; a config file is required for \fBsync\fR.
+.B "rcal add-account"
+or
+.B "rcal subscribe"
+(see COMMANDS) or by hand. A
+.B server
+section is only needed for CalDAV synchronization; a subscription-only setup
+works without one.
 .PP
 .nf
 [server]
@@ -152,18 +201,51 @@ password_command = "pass show caldav/alice"
 default_view = "today"
 time_format = "24h"
 color_scheme = "auto"
+accent_color = "#d970ff"
 
-[calendars]
-show = []
-hide = []
+[[calendar_colors]]
+name = "Work"
+color = "#e6194b"
 
-[notifications]
-enabled = true
-reminder_minutes = [15, 5]
+[[calendar_colors]]
+name = "Holidays"
+color = "#42d4f4"
+
+[[subscriptions]]
+name = "Holidays"
+url = "https://example.com/holidays.ics"
 .fi
 .PP
-The \fBdisplay\fR, \fBcalendars\fR and \fBnotifications\fR tables are
-optional and their values fall back to the defaults shown above.
+The
+.B server
+and
+.B display
+tables and the
+.B subscriptions
+and
+.B calendar_colors
+lists are optional and their values fall back to the defaults shown above.
+.B accent_color
+is the \fI#RRGGBB\fR terminal color used to accent event summaries; events
+belonging to a calendar with its own color use that calendar's color
+instead. A calendar that has no explicit color is assigned a random
+distinct palette color on first sync, so every calendar defaults to a
+different accent.
+.PP
+To set a specific color for a calendar, add a
+.B [[calendar_colors]]
+entry for its display name (as shown by the \fBcalendars\fR command) and an
+\fI#RRGGBB\fR color:
+.nf
+[[calendar_colors]]
+name = "Work"
+color = "#e6194b"
+.fi
+.PP
+Such an entry overrides both a color announced by the server and the random
+palette default. Removing the entry leaves the calendar's current color in
+place. Each subscribed feed appears as its own entry under
+.BR subscriptions .
 .SH ENVIRONMENT
 .TP
 .B RCAL_PASSWORD
@@ -191,8 +273,8 @@ SQLite database holding the offline event cache and sync metadata
 .PP
 Create a config file interactively, or with flags:
 .nf
-$ rcal init
-$ rcal init -u https://dav.example.com/ --username alice \\
+$ rcal add-account
+$ rcal add-account -u https://dav.example.com/ --username alice \\
            --password-command "pass show caldav/alice"
 .fi
 .PP
@@ -201,9 +283,10 @@ Show today's events:
 $ rcal today
 .fi
 .PP
-Show the events of March 1, 2026:
+Show the events of March 1, 2026 (or the single event active at 10:30):
 .nf
 $ rcal show 2026-03-01
+$ rcal show 2026-03-01@10:30
 .fi
 .PP
 Preview an iCal file without importing and then import everything:
@@ -218,9 +301,16 @@ $ rcal new --title "Design review" --date 2026-03-02 --time 14:00 \\
            --location "Room 3" --calendar "http://dav.example.com/alice/work/"
 .fi
 .PP
-Synchronize with the CalDAV server:
+Subscribe to a read-only ICS feed and synchronize with the CalDAV server:
 .nf
+$ rcal subscribe --name Holidays https://example.com/holidays.ics
 $ rcal sync
+.fi
+.PP
+Delete an event and synchronize calendars:
+.nf
+$ rcal delete 2026-03-02@14:00
+$ rcal calendars
 .fi
 .SH EXIT STATUS
 Exit status is \fB0\fR on success and \fB1\fR on error.

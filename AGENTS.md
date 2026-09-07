@@ -52,6 +52,10 @@ cargo test           # run the full suite (unit + mock-server tests)
   `handle_new`, `handle_delete` (event deletion with confirmation; deletes
   locally and, for CalDAV events, on the server via `CalDavClient`),
   `prompt`, `parse_time`, `parse_date`, `parse_month`, sync output rendering.
+  View plumbing: `show_day`/`show_week`/`show_month` build `ColoredEvent`
+  lists via `colored_events()` (resolution: event's calendar color ->
+  `[display] accent_color` fallback) with `calendar_color_map()` /
+  `accent_color()` helpers; `find_event_at_time` takes `Vec<&CalendarEvent>`.
 - `src/config.rs` — TOML config, default paths, `Config::new`/`write_to`
   (used by `rcal add-account`). `Config::server` is `Option<ServerConfig>`
   (absent for subscription-only setups); `handle_subscribe`/`subscribe.rs`
@@ -59,7 +63,9 @@ cargo test           # run the full suite (unit + mock-server tests)
   mentioning `rcal add-account`/`rcal subscribe` when the file is missing.
 - `src/db.rs` — `rusqlite` database. Schema: `calendars` (`id`, `name`,
   `color`, `ctag`, `sync_token`) and `events` (keyed on `uid`, with
-  `calendar_id`, `etag`, `ical_data`, `updated_at`, ...). Key types:
+  `calendar_id`, `etag`, `ical_data`, `updated_at`, ...). Calendars without
+  an explicit color are assigned a random palette color on first insert
+  (`insert_calendar`). Key types:
   `StoredEvent { event, etag, calendar_id }`,
   `Calendar { id, name, color, event_count }`.
 - `src/ical.rs` — parse .ics files/text, export events (`export_ical`,
@@ -70,9 +76,11 @@ cargo test           # run the full suite (unit + mock-server tests)
   wiremock-based tests.
 - `src/subscribe.rs` — ICS subscription fetch (`refresh_subscription`),
   full-replace sync logic (`apply_calendar`), scheme validation, tests.
-- `src/display.rs` — day/week/month renderers; `colorize` / `pad_to_width`
-  utilities for ANSI 24-bit foreground accent coloring (from
-  `[display] accent_color` in the config file).
+- `src/display.rs` — day/week/month renderers; `ColoredEvent { event,
+  color }` (with `Deref` to `CalendarEvent`) carries each event's accent
+  color; `colorize` / `pad_to_width` / `visible_width` utilities for ANSI
+  24-bit foreground accent coloring. Render signatures take
+  `&[ColoredEvent]` (or `Option<&str>` for single-detail rendering).
 
 Key signatures to remember:
 
@@ -81,7 +89,9 @@ Key signatures to remember:
 - `set_sync_metadata(uid, calendar_id, etag, ical_data)`
 - `get_events_for_calendar(calendar_id)` -> `Vec<StoredEvent>`
 - `get_stored_events_for_day(NaiveDate)` -> `Vec<StoredEvent>` (with
-  `calendar_id`/`etag`, used by `rcal delete`)
+  `calendar_id`/`etag`, used by `rcal delete` and the day view)
+- `get_all_stored_events(from, to)` -> `Vec<StoredEvent>` (stored variant of
+  `get_all_events`, used by the week/month views)
 - `handle_add_account` in `main.rs` implements `rcal add-account`
   (interactive prompts, `--force` guard, XDG-aware path, preserves existing
   config settings in place). `handle_subscribe` implements `rcal subscribe`.
@@ -100,6 +110,9 @@ local cache — a known limitation, handle it if the task surfaces it.
   Created by `rcal add-account` (`Config::new` + `Config::write_to`); refuses to
   overwrite unless `--force` or interactive confirmation is given. `rcal subscribe`
   also creates a server-less config containing only `[[subscriptions]]` entries.
+  `[[calendar_colors]]` entries (`name` + `color`) override a calendar's color on
+  sync, winning over server colors and the random palette default
+  (`Config::calendar_color_for`).
 - Database: `$XDG_DATA_HOME/rcal/rcal.db` (default `~/.local/share/rcal/rcal.db`).
 - Password resolution order: `password_command` (stdout = password) ->
   `RCAL_PASSWORD` env var -> interactive `rpassword` prompt.
@@ -109,7 +122,7 @@ local cache — a known limitation, handle it if the task surfaces it.
 
 ## Unit tests
 
-- 79 tests target: ical parsing/export, db CRUD, caldav XML parsing,
+- 94 tests target: ical parsing/export, db CRUD, caldav XML parsing,
   caldav DELETE, sync logic (`run_sync` in-memory), subscription
   logic (`apply_calendar`), delete-selection unit tests, and
   wiremock end-to-end sync + push + delete tests.
