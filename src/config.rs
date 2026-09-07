@@ -15,6 +15,11 @@ pub struct Config {
     pub notifications: NotificationsConfig,
     #[serde(default)]
     pub subscriptions: Vec<IcsSubscription>,
+    /// Per-calendar color overrides, matched on calendar name. When present
+    /// these win over both a server-provided color and the random palette
+    /// default.
+    #[serde(default)]
+    pub calendar_colors: Vec<CalendarColorEntry>,
 }
 
 /// A read-only online ICS calendar that rcal fetches and caches locally.
@@ -24,6 +29,15 @@ pub struct IcsSubscription {
     pub name: String,
     /// URL of the .ics feed.
     pub url: String,
+}
+
+/// User-assigned color for a calendar, looked up by name.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CalendarColorEntry {
+    /// Display name of the calendar (as shown by `rcal calendars`).
+    pub name: String,
+    /// `#RRGGBB` color for the calendar's event summaries and month markers.
+    pub color: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -112,6 +126,7 @@ impl Default for Config {
             calendars: CalendarsConfig::default(),
             notifications: NotificationsConfig::default(),
             subscriptions: Vec::new(),
+            calendar_colors: Vec::new(),
         }
     }
 }
@@ -133,6 +148,7 @@ impl Config {
             calendars: CalendarsConfig::default(),
             notifications: NotificationsConfig::default(),
             subscriptions: Vec::new(),
+            calendar_colors: Vec::new(),
         }
     }
 
@@ -220,6 +236,16 @@ impl Config {
         }
         self.subscriptions.push(IcsSubscription { name, url });
         true
+    }
+
+    /// The user-assigned `#RRGGBB` color for the calendar called `name`, from
+    /// the `[[calendar_colors]]` sections. `None` when the user has not
+    /// configured a color for that calendar name.
+    pub fn calendar_color_for(&self, name: &str) -> Option<&str> {
+        self.calendar_colors
+            .iter()
+            .find(|e| e.name == name)
+            .map(|e| e.color.as_str())
     }
 }
 
@@ -377,6 +403,58 @@ color_scheme = "auto"
         let legacy: Config = toml::from_str(content).unwrap();
         assert_eq!(legacy.display.accent_color, None);
 
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_calendar_colors_roundtrip() {
+        let path = temp_config_path();
+        let mut config = Config::new("https://dav.example.com/", "alice", None);
+        config
+            .calendar_colors
+            .push(CalendarColorEntry {
+                name: "Work".to_string(),
+                color: "#ff0000".to_string(),
+            });
+        config
+            .calendar_colors
+            .push(CalendarColorEntry {
+                name: "Holidays".to_string(),
+                color: "#00ff00".to_string(),
+            });
+        config.write_to(&path).unwrap();
+
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.calendar_colors.len(), 2);
+        assert_eq!(loaded.calendar_color_for("Work"), Some("#ff0000"));
+        assert_eq!(loaded.calendar_color_for("Holidays"), Some("#00ff00"));
+        // Exact name match only.
+        assert_eq!(loaded.calendar_color_for("work"), None);
+        assert_eq!(loaded.calendar_color_for("Other"), None);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_calendar_colors_default_to_empty() {
+        let path = temp_config_path();
+        Config::new("https://dav.example.com/", "alice", None)
+            .write_to(&path)
+            .unwrap();
+        let loaded = Config::load_from(&path).unwrap();
+        assert!(loaded.calendar_colors.is_empty());
+        assert_eq!(loaded.calendar_color_for("Work"), None);
+
+        // A config written before calendar_colors existed (a plain `[server]`
+        // block) still parses with an empty list.
+        let content = r#"
+[server]
+url = "https://dav.example.com/"
+username = "alice"
+password_command = "echo secret"
+"#;
+        let legacy: Config = toml::from_str(content).unwrap();
+        assert!(legacy.calendar_colors.is_empty());
         std::fs::remove_file(&path).ok();
     }
 

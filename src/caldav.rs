@@ -494,8 +494,13 @@ async fn sync_calendar(
             pushed: 0,
         };
 
-        // Ensure calendar row exists locally
-        db.insert_calendar(&cal.href, &cal.name, cal.color.as_deref())?;
+        // Ensure calendar row exists locally. A [[calendar_colors]] override
+        // from the config wins over a server-provided color.
+        let config_color = Config::load()
+            .ok()
+            .and_then(|c| c.calendar_color_for(&cal.name).map(String::from));
+        let color = config_color.or_else(|| cal.color.clone());
+        db.insert_calendar(&cal.href, &cal.name, color.as_deref())?;
 
         let remote_events = self.fetch_events(cal).await?;
         let mut remote_uids: HashSet<String> = HashSet::new();
