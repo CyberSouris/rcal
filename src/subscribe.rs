@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use std::collections::HashSet;
 
-use crate::config::Config;
 use crate::db::Database;
 use crate::ical::parse_ical_text;
 
@@ -69,12 +68,9 @@ fn apply_calendar(
     url: &str,
     calendar: &crate::ical::Calendar,
 ) -> Result<SubscriptionRefreshResult> {
-    // A [[calendar_colors]] override in the config wins over the random
-    // default.
-    let color = Config::load()
-        .ok()
-        .and_then(|c| c.calendar_color_for(name).map(String::from));
-    db.insert_calendar(url, name, color.as_deref())?;
+    // The subscription's calendar row tracks the feed URL; colors come from
+    // the config `[[calendar_colors]]` sections at display time.
+    db.insert_calendar(url, name)?;
 
     let mut result = SubscriptionRefreshResult {
         name: name.to_string(),

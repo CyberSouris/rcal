@@ -67,8 +67,8 @@ with flags:
 
 [source,sh]
 ----
-rcal init                                              # interactive prompts
-rcal init -u https://dav.example.com/ --username alice \
+rcal add-account                                       # interactive prompts
+rcal add-account -u https://dav.example.com/ --username alice \
           --password-command "pass show caldav/alice"  # non-interactive
 ----
 
@@ -77,7 +77,7 @@ The file is written to `~/.config/rcal/config.toml`
 
 [source,toml]
 ----
-[server]
+[[servers]]
 url = "https://dav.example.com/"
 username = "alice"
 password_command = "pass show caldav/alice"
@@ -94,14 +94,25 @@ hide = []
 [notifications]
 enabled = true
 reminder_minutes = [15, 5]
+
+[[calendar_colors]]
+name = "Work"
+color = "#e6194b"
 ----
 
-Only the `[server]` table is required; it can also be written by hand and
-`rcal sync` will not overwrite it. The password is resolved in this order:
+At least one `[[servers]]` entry or `[[subscriptions]]` entry is required; it
+can also be written by hand and `rcal sync` will not overwrite it. Multiple
+accounts are supported by adding more `[[servers]]` or `[[subscriptions]]`
+tables, and a legacy single `[server]` table still works. The password is
+resolved in this order:
 
 1. `password_command` — a shell command whose stdout is the password
 2. the `RCAL_PASSWORD` environment variable
 3. an interactive prompt
+
+Calendar colors are configured only through `[[calendar_colors]]` (matched on
+calendar name; the `[display] accent_color` is the fallback). They are applied
+when events are drawn and are never stored in the database.
 
 === First sync
 
@@ -109,7 +120,7 @@ Only the `[server]` table is required; it can also be written by hand and
 ----
 rcal sync                        # pull remote events into the offline cache
 rcal today                       # see what is coming up
-rcal calendars                   # list discovered calendars and colors
+rcal calendars                   # list calendars with their config colors
 ----
 
 === Creating events
@@ -121,18 +132,19 @@ rcal new --title "Standup" --date 2026-03-02 --time 09:00 --calendar Work
 rcal new -t "Holiday" -a -l "Home"        # all-day event
 ----
 
-Newly created events are stored locally and uploaded to the CalDAV server the
-next time you run `rcal sync`.
+Newly created events are stored locally and uploaded to the CalDAV server that
+owns their calendar the next time you run `rcal sync`.
 
 == Usage reference
 
 `rcal today`:: Show today's events
-`rcal init [-u URL] [--username USER] [--password-command CMD] [-f]`:: Create a config file
+`rcal add-account [-u URL] [--username USER] [--password-command CMD] [-f]`:: Add a CalDAV account (appends to the config)
+`rcal subscribe URL [--name NAME]`:: Subscribe to an online ICS feed
 `rcal week [-D DATE]`:: Week overview (`YYYY-MM-DD`)
 `rcal month [-M MONTH]`:: Month overview (`YYYY-MM`)
 `rcal show DATE`:: Events for a specific date
 `rcal import FILE [--add] [--dry-run]`:: Import an `.ics` file
-`rcal sync`:: Synchronize with the CalDAV server
+`rcal sync`:: Synchronize with the configured CalDAV servers and ICS subscriptions
 `rcal new [-t TITLE] [-d DATE] [--time HH:MM] [-D MIN] [-a] [-l LOC] [--description DESC] [-c CAL]`:: Create an event
 `rcal search QUERY [--from DATE] [--to DATE]`:: Search events
 `rcal calendars`:: List calendars

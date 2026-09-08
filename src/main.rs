@@ -210,7 +210,7 @@ async fn main() -> anyhow::Result<()> {
         }) => handle_import(&file, add, dry_run),
         Some(Commands::Sync) => {
             let config = config::Config::load()?;
-            if config.server.is_none() && config.subscriptions.is_empty() {
+            if config.servers.is_empty() && config.subscriptions.is_empty() {
                 return Err(anyhow::anyhow!(
                     "No CalDAV account or ICS subscription configured. Run 'rcal add-account' \
                      to connect one, or 'rcal subscribe <URL>' for an online ICS feed."
@@ -218,26 +218,23 @@ async fn main() -> anyhow::Result<()> {
             }
             let db = db::Database::open()?;
 
-            if let Some(server) = config.server.as_ref() {
-                let client = caldav::CalDavClient::new(&config)?;
+            for server in &config.servers {
+                let client = caldav::CalDavClient::new(server)?;
 
                 println!("Discovering calendars at {} ...", server.url);
                 let calendars = client.discover_calendars().await?;
                 println!("Found {} calendar(s):", calendars.len());
                 for cal in &calendars {
-                    let suffix = cal.color.as_deref().map(|c| format!(" [{}]", c)).unwrap_or_default();
                     println!(
-                        "  {} ({}){}",
+                        "  {} ({})",
                         display::sanitize(&cal.name),
-                        display::sanitize(&cal.href),
-                        suffix
+                        display::sanitize(&cal.href)
                     );
                 }
                 println!();
 
                 let summary = client.sync(&db, &calendars).await?;
 
-                let mut total = 0usize;
                 for result in &summary.calendars {
                     println!(
                         "  {}: +{} added, ~{} updated, {} unchanged, -{} deleted, ↑{} pushed",
@@ -248,7 +245,6 @@ async fn main() -> anyhow::Result<()> {
                         result.deleted,
                         result.pushed
                     );
-                    total += result.added + result.updated + result.unchanged + result.deleted;
                 }
                 println!();
                 println!(
@@ -258,7 +254,7 @@ async fn main() -> anyhow::Result<()> {
                     summary.total_unchanged,
                     summary.total_deleted,
                     summary.total_pushed,
-                    total,
+                    summary.calendars.iter().map(|r| r.added + r.updated + r.unchanged + r.deleted).sum::<usize>(),
                     summary.calendars.len(),
                 );
             }
@@ -339,13 +335,17 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Calendars) => {
             let db = db::Database::open()?;
             let calendars = db.get_calendars()?;
+            let config = config::Config::load().ok();
             if calendars.is_empty() {
                 println!("No calendars. Use 'rcal sync' to pull from a CalDAV server or 'rcal import' to add events.");
             } else {
                 for calendar in calendars {
+                    let color = config
+                        .as_ref()
+                        .and_then(|c| c.calendar_color_for(&calendar.name));
                     println!(
                         "{} {:<28} {} event(s)",
-                        color_swatch(calendar.color.as_deref()),
+                        color_swatch(color),
                         display::sanitize(&calendar.name),
                         calendar.event_count
                     );
@@ -406,11 +406,23 @@ fn accent_color() -> Option<String> {
         .filter(|c| !c.trim().is_empty())
 }
 
-/// A map of `calendar_id` -> its stored color (`#RRGGBB`), used to accent
-/// each event with the color of the calendar it belongs to.
+/// A map of `calendar_id` -> its color (`#RRGGBB`), resolved from the
+/// `[[calendar_colors]]` config sections by calendar name. Colors live only
+/// in the config; they are applied here when events are rendered.
 fn calendar_color_map(db: &db::Database) -> HashMap<String, Option<String>> {
+    let config = config::Config::load().ok();
     db.get_calendars()
-        .map(|cals| cals.into_iter().map(|c| (c.id, c.color)).collect())
+        .map(|cals| {
+            cals.into_iter()
+                .map(|c| {
+                    let color = config
+                        .as_ref()
+                        .and_then(|cfg| cfg.calendar_color_for(&c.name))
+                        .map(String::from);
+                    (c.id, color)
+                })
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -683,6 +695,7 @@ fn handle_new(
 
     let db = db::Database::open()?;
     let calendars = db.get_calendars()?;
+    let config = config::Config::load().ok();
     let interactive = std::io::stdin().is_terminal();
 
     // --- Resolve target calendar ---
@@ -716,7 +729,15 @@ fn handle_new(
             } else if interactive {
                 println!("Select a calendar:");
                 for (i, c) in calendars.iter().enumerate() {
-                    println!("  {}. {} {}", i + 1, color_swatch(c.color.as_deref()), display::sanitize(&c.name));
+                    let color = config
+                        .as_ref()
+                        .and_then(|cfg| cfg.calendar_color_for(&c.name));
+                    println!(
+                        "  {}. {} {}",
+                        i + 1,
+                        color_swatch(color),
+                        display::sanitize(&c.name)
+                    );
                 }
                 let choice = prompt(
                     &format!("Calendar [1-{}]", calendars.len()),
@@ -848,11 +869,19 @@ fn handle_new(
     };
 
     println!();
+    let color = calendar_id.as_deref().and_then(|id| {
+        calendars
+            .iter()
+            .find(|c| c.id == *id)
+            .and_then(|c| {
+                config
+                    .as_ref()
+                    .and_then(|cfg| cfg.calendar_color_for(&c.name))
+            })
+    });
     println!(
         "{} {} ({})",
-        color_swatch(calendar_id.as_deref().and_then(|id| {
-            calendars.iter().find(|c| c.id == *id).and_then(|c| c.color.as_deref())
-        })),
+        color_swatch(color),
         display::sanitize(&event.summary),
         format_event_time(&event)
     );
@@ -890,7 +919,7 @@ fn handle_add_account(
         if !force && interactive {
             let answer = prompt(
                 &format!(
-                    "A config file exists at {}; update its CalDAV account? [y/N]",
+                    "A config file exists at {}; add this CalDAV account to it? [y/N]",
                     path.display()
                 ),
                 Some("n"),
@@ -903,7 +932,7 @@ fn handle_add_account(
             }
         } else if !force {
             anyhow::bail!(
-                "Config file already exists at {}. Use --force to overwrite.",
+                "Config file already exists at {}. Use --force to add another account.",
                 path.display()
             );
         }
@@ -938,13 +967,19 @@ fn handle_add_account(
         _ => None,
     };
 
-    let mut config = config::Config::new(url.clone(), username.clone(), password_command);
-    if let Ok(existing) = config::Config::load_from(&path) {
-        config.display = existing.display;
-        config.calendars = existing.calendars;
-        config.notifications = existing.notifications;
-        config.subscriptions = existing.subscriptions;
+    let mut config = if path.exists() {
+        config::Config::load_from(&path)?
+    } else {
+        config::Config::default()
+    };
+    if config.servers.iter().any(|s| s.url == url) {
+        anyhow::bail!("A server with URL {} is already configured.", url);
     }
+    config.servers.push(config::ServerConfig {
+        url: url.clone(),
+        username: username.clone(),
+        password_command,
+    });
     config.write_to(&path)?;
 
     println!(
@@ -1197,7 +1232,17 @@ async fn handle_delete(
                     display::sanitize(&cal_name)
                 );
             } else {
-                let client = caldav::CalDavClient::new(&config)?;
+                let server = config
+                    .servers
+                    .iter()
+                    .find(|s| cal_id.starts_with(&s.url))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "No configured CalDAV server owns calendar '{}'.",
+                            cal_id
+                        )
+                    })?;
+                let client = caldav::CalDavClient::new(server)?;
                 client
                     .delete_event_by_uid(cal_id, &event.uid, stored_event.etag.as_deref())
                     .await?;
@@ -1423,7 +1468,6 @@ mod tests {
         db::Calendar {
             id: id.to_string(),
             name: name.to_string(),
-            color: None,
             event_count: 0,
         }
     }

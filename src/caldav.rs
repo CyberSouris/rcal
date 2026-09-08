@@ -4,14 +4,13 @@ use roxmltree::{Document, Node};
 use std::collections::HashSet;
 use url::Url;
 
-use crate::config::Config;
+use crate::config::ServerConfig;
 use crate::db::Database;
 use crate::display;
 use crate::ical::parse_ical_text;
 
 pub const DAV_NS: &str = "DAV:";
 pub const CALDAV_NS: &str = "urn:ietf:params:xml:ns:caldav";
-pub const APPLE_NS: &str = "http://apple.com/ns/ical/";
 
 const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
@@ -26,12 +25,11 @@ const PROPFIND_ROOT_BODY: &str = "<?xml version=\"1.0\" encoding=\"utf-8\" ?>
 </d:propfind>";
 
 const PROPFIND_CALENDARS_BODY: &str = "<?xml version=\"1.0\" encoding=\"utf-8\" ?>
-<d:propfind xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\" xmlns:ical=\"http://apple.com/ns/ical/\">
+<d:propfind xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\">
   <d:prop>
     <d:resourcetype/>
     <d:displayname/>
     <c:calendar-description/>
-    <ical:calendar-color/>
   </d:prop>
 </d:propfind>";
 
@@ -53,7 +51,6 @@ const CALENDAR_QUERY_BODY: &str = "<?xml version=\"1.0\" encoding=\"utf-8\" ?>
 pub struct RemoteCalendar {
     pub href: String,
     pub name: String,
-    pub color: Option<String>,
 }
 
 /// An event fetched from the server
@@ -88,12 +85,7 @@ pub struct SyncSummary {
 
 /// Resolve the server password using, in order:
 /// `password_command`, the `RCAL_PASSWORD` env var, then an interactive prompt.
-pub fn resolve_password(config: &Config) -> Result<String> {
-    let server = config
-        .server
-        .as_ref()
-        .context("No CalDAV account configured; run 'rcal add-account'")?;
-
+pub fn resolve_password(server: &ServerConfig) -> Result<String> {
     if let Some(cmd) = &server.password_command {
         let output = std::process::Command::new("sh")
             .arg("-c")
@@ -164,13 +156,9 @@ pub struct CalDavClient {
 }
 
 impl CalDavClient {
-    pub fn new(config: &Config) -> Result<Self> {
-        let server = config
-            .server
-            .as_ref()
-            .context("No CalDAV account configured; run 'rcal add-account'")?;
+    pub fn new(server: &ServerConfig) -> Result<Self> {
         validate_scheme(&server.url)?;
-        let password = resolve_password(config)?;
+        let password = resolve_password(server)?;
         let http = reqwest::Client::builder()
             .user_agent(concat!("rcal/", env!("CARGO_PKG_VERSION")))
             .build()
@@ -494,13 +482,10 @@ async fn sync_calendar(
             pushed: 0,
         };
 
-        // Ensure calendar row exists locally. A [[calendar_colors]] override
-        // from the config wins over a server-provided color.
-        let config_color = Config::load()
-            .ok()
-            .and_then(|c| c.calendar_color_for(&cal.name).map(String::from));
-        let color = config_color.or_else(|| cal.color.clone());
-        db.insert_calendar(&cal.href, &cal.name, color.as_deref())?;
+        // Ensure calendar row exists locally. Colors live in the config file
+        // (`[[calendar_colors]]`) and are applied at display time; the
+        // database only tracks calendars and events.
+        db.insert_calendar(&cal.href, &cal.name)?;
 
         let remote_events = self.fetch_events(cal).await?;
         let mut remote_uids: HashSet<String> = HashSet::new();
@@ -664,9 +649,8 @@ fn calendar_collections_from(doc: &Document, base: &str) -> Option<Vec<RemoteCal
             let trimmed = href.trim_end_matches('/');
             trimmed.rsplit('/').next().unwrap_or("").to_string()
         });
-        let color = prop_text(&resp, "calendar-color", APPLE_NS);
 
-        calendars.push(RemoteCalendar { href, name, color });
+        calendars.push(RemoteCalendar { href, name });
     }
 
     if calendars.is_empty() {
@@ -775,7 +759,7 @@ mod tests {
     }
 
     const MULTISTATUS_CALENDARS: &str = r#"<?xml version="1.0"?>
-<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:ical="http://apple.com/ns/ical/">
+<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
   <d:response>
     <d:href>/dav/calendars/alice/work/</d:href>
     <d:propstat>
@@ -786,7 +770,6 @@ mod tests {
           <c:calendar/>
         </d:resourcetype>
         <d:displayname>Work</d:displayname>
-        <ical:calendar-color>#2952A3</ical:calendar-color>
       </d:prop>
     </d:propstat>
   </d:response>
@@ -825,10 +808,8 @@ mod tests {
         assert_eq!(cals.len(), 2);
         assert_eq!(cals[0].href, "https://example.com/dav/calendars/alice/work/");
         assert_eq!(cals[0].name, "Work");
-        assert_eq!(cals[0].color.as_deref(), Some("#2952A3"));
         assert_eq!(cals[1].href, "https://example.com/dav/calendars/alice/personal/");
         assert_eq!(cals[1].name, "Personal");
-        assert_eq!(cals[1].color, None);
     }
 
     const MULTISTATUS_EVENTS: &str = r#"<?xml version="1.0"?>
@@ -924,7 +905,7 @@ END:VCALENDAR</c:calendar-data>
             cal: &RemoteCalendar,
             remote: Vec<RemoteEvent>,
         ) -> CalendarSyncResult {
-            db.insert_calendar(&cal.href, &cal.name, None).unwrap();
+            db.insert_calendar(&cal.href, &cal.name).unwrap();
 
             let mut result = CalendarSyncResult {
                 name: cal.name.clone(),
@@ -978,7 +959,6 @@ END:VCALENDAR</c:calendar-data>
             let cal = RemoteCalendar {
                 href: "https://example.com/dav/calendars/work/".to_string(),
                 name: "Work".to_string(),
-                color: None,
             };
 
             let evt1 = CalendarEvent {
@@ -1145,7 +1125,7 @@ END:VCALENDAR</c:calendar-data>
             status: None,
             recurrence: None,
         };
-        db.insert_calendar(&work, "Work", None).unwrap();
+        db.insert_calendar(&work, "Work").unwrap();
         db.insert_event(&local_evt, Some(&work), None, None).unwrap();
 
         let calendars = client.discover_calendars().await.unwrap();
@@ -1212,7 +1192,6 @@ END:VCALENDAR</c:calendar-data>
 
     #[tokio::test]
     async fn test_delete_event_treats_not_found_as_success() {
-        use wiremock::matchers::method;
         let server = wiremock::MockServer::start().await;
 
         // No mock is mounted: any request returns 404.

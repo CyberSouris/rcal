@@ -814,7 +814,7 @@ mod tests {
     fn test_render_week_grid_aligns_columns() {
         let monday = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
         let mut events = Vec::new();
-        for (i, day) in (0..7).enumerate() {
+        for i in 0..7u32 {
             let date = monday + chrono::Days::new(i as u64);
             let start = Local.with_ymd_and_hms(date.year(), date.month(), date.day(), 9, 0, 0).single().unwrap();
             let end = start + chrono::Duration::hours(1);
@@ -1112,7 +1112,6 @@ mod tests {
 
     #[test]
     fn test_render_event_details_empty_fields() {
-        let date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
         let start = Local.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).single().unwrap();
         let end = start + chrono::Duration::hours(1);
         let event = local_event("Standup", start, end);

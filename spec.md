@@ -115,9 +115,10 @@ Import iCal (.ics) file.
   - Allows user to resolve: add anyway, skip, or edit
 
 #### `sync`
-Synchronize with configured CalDAV server.
-- Pull remote changes
-- Push local changes
+Synchronize with all configured CalDAV servers and ICS subscriptions.
+- For each CalDAV account in `[[servers]]`: discover calendars, pull remote
+  changes, push local changes, show sync status
+- Then refresh each `[[subscriptions]]` feed
 - Show sync status and conflicts
 
 #### `new`
@@ -132,8 +133,9 @@ Search events matching the query.
 - Filter by date range if needed
 
 #### `calendars`
-List available calendars from CalDAV server.
-- Show calendar names, colors, event counts
+List available calendars.
+- Show calendar names, config colors (`[[calendar_colors]]` swatches), and
+  event counts
 
 ## Configuration
 
@@ -145,15 +147,16 @@ List available calendars from CalDAV server.
 ### Config Structure
 
 ```toml
-[server]
+# One or more CalDAV accounts. A legacy single `[server]` table is also
+# accepted and treated as the first `[[servers]]` entry.
+[[servers]]
 url = "https://calendar.example.com/dav/"
 username = "user@example.com"
 
 # Option 1: Command to get password (e.g., from keyring or secrets manager)
 password_command = "secret-tool lookup service rcal username user@example.com"
 
-# Option 2: Use system keyring (default if password_command not set)
-# No configuration needed, will prompt on first use
+# Option 2: fall back to RCAL_PASSWORD env var, then an interactive prompt
 
 [display]
 # Default view: today, week, month
@@ -198,12 +201,13 @@ reminder_minutes = [15, 5]
 ### Database Schema (Draft)
 
 ```sql
--- Calendars
+-- Calendars. Colors are NOT stored here: they are read from the
+-- [[calendar_colors]] sections of the config file and applied at display
+-- time. Opening a database from an older rcal drops the obsolete `color`
+-- column automatically.
 CREATE TABLE calendars (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
-    color TEXT,
-    display_name TEXT,
     ctag TEXT,  -- Change tag for sync
     sync_token TEXT
 );

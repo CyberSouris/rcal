@@ -56,27 +56,36 @@ cargo test           # run the full suite (unit + mock-server tests)
   locally and, for CalDAV events, on the server via `CalDavClient`),
   `prompt`, `parse_time`, `parse_date`, `parse_month`, sync output rendering.
   View plumbing: `show_day`/`show_week`/`show_month` build `ColoredEvent`
-  lists via `colored_events()` (resolution: event's calendar color ->
-  `[display] accent_color` fallback) with `calendar_color_map()` /
+  lists via `colored_events()` (resolution: config `[[calendar_colors]]`
+  color matched on calendar name -> `[display] accent_color` fallback) with
+  `calendar_color_map()` (reads colors from the config, not the DB) /
   `accent_color()` helpers; `find_event_at_time` takes `Vec<&CalendarEvent>`.
-- `src/config.rs` — TOML config, default paths, `Config::new`/`write_to`
-  (used by `rcal add-account`). `Config::server` is `Option<ServerConfig>`
-  (absent for subscription-only setups); `handle_subscribe`/`subscribe.rs`
+- `src/config.rs` — TOML config, default paths, `write_to` (used by
+  `rcal add-account`). `Config::servers` is a `Vec<ServerConfig>`; a legacy
+  single `[server]` table is accepted on load and merged into `servers` at
+  index 0, so old config files keep working. `Config::server()` accessor is
+  gone; `rcal sync` iterates `servers` then `subscriptions`. Empty `servers`
+  means subscription-only setups; `handle_subscribe`/`subscribe.rs`
   auto-create a server-less config. `Config::load()` errors with a hint
   mentioning `rcal add-account`/`rcal subscribe` when the file is missing.
+  `rcal add-account` appends a new `ServerConfig` to any existing config
+  (duplicate URLs are rejected) instead of replacing it.
 - `src/db.rs` — `rusqlite` database. Schema: `calendars` (`id`, `name`,
-  `color`, `ctag`, `sync_token`) and `events` (keyed on `uid`, with
-  `calendar_id`, `etag`, `ical_data`, `updated_at`, ...). Calendars without
-  an explicit color are assigned a random palette color on first insert
-  (`insert_calendar`). Key types:
+  `ctag`, `sync_token`) and `events` (keyed on `uid`, with
+  `calendar_id`, `etag`, `ical_data`, `updated_at`, ...). Colors are never
+  stored here: they are read from the config and applied at display time.
+  Opening a database created by an older rcal drops the obsolete
+  `calendars.color` column automatically. Key types:
   `StoredEvent { event, etag, calendar_id }`,
-  `Calendar { id, name, color, event_count }`.
+  `Calendar { id, name, event_count }`.
 - `src/ical.rs` — parse .ics files/text, export events (`export_ical`,
   RFC 5545 `fold_line`), `parse_ical_datetime`.
-- `src/caldav.rs` — `CalDavClient`, password resolution, PROPFIND discovery,
-  REPORT `calendar-query` fetch, ETag-based sync, PUT push, DELETE
+- `src/caldav.rs` — `CalDavClient` (`new` takes a `&ServerConfig`),
+  password resolution (`resolve_password` takes `&ServerConfig`), PROPFIND
+  discovery, REPORT `calendar-query` fetch, ETag-based sync, PUT push, DELETE
   (`delete_event`/`delete_event_by_uid`), XML helpers,
-  wiremock-based tests.
+  wiremock-based tests. Calendar colors are not fetched from the server;
+  the config is the only color source.
 - `src/subscribe.rs` — ICS subscription fetch (`refresh_subscription`),
   full-replace sync logic (`apply_calendar`), scheme validation, tests.
 - `src/display.rs` — day/week/month renderers; `ColoredEvent { event,
@@ -96,12 +105,14 @@ Key signatures to remember:
 - `get_all_stored_events(from, to)` -> `Vec<StoredEvent>` (stored variant of
   `get_all_events`, used by the week/month views)
 - `handle_add_account` in `main.rs` implements `rcal add-account`
-  (interactive prompts, `--force` guard, XDG-aware path, preserves existing
-  config settings in place). `handle_subscribe` implements `rcal subscribe`.
+  (interactive prompts, `--force` guard, XDG-aware path, appends the new
+  account to `Config::servers` and preserves all existing config settings).
+  `handle_subscribe` implements `rcal subscribe`.
 - `rcal delete YYYY-MM-DD[@HH:MM]` removes one local event (forced by exact
   start time when several start that day); `--calendar NAME|URL|local`
   restricts the match to one calendar; CalDAV-synced events are deleted
-  on the server first, subscription-cached events are only removed locally
+  on the server first (the server is found by matching its URL against the
+  calendar id prefix), subscription-cached events are only removed locally
   (the feed re-adds them on the next refresh).
 
 Events are keyed only on `uid`; the same UID in two calendars collides in the
@@ -110,12 +121,13 @@ local cache — a known limitation, handle it if the task surfaces it.
 ## Configuration and credentials
 
 - Config: `$XDG_CONFIG_HOME/rcal/config.toml` (default `~/.config/rcal/config.toml`).
-  Created by `rcal add-account` (`Config::new` + `Config::write_to`); refuses to
-  overwrite unless `--force` or interactive confirmation is given. `rcal subscribe`
+  Created by `rcal add-account` (starts from `Config::default()`, appends a
+  `ServerConfig`, then `Config::write_to`); refuses to overwrite unless
+  `--force` or interactive confirmation is given. `rcal subscribe`
   also creates a server-less config containing only `[[subscriptions]]` entries.
-  `[[calendar_colors]]` entries (`name` + `color`) override a calendar's color on
-  sync, winning over server colors and the random palette default
-  (`Config::calendar_color_for`).
+  `[[calendar_colors]]` entries (`name` + `color`) are the only source of
+  calendar colors; they are applied at display time over the `[display]`
+  `accent_color` fallback (`Config::calendar_color_for`).
 - Database: `$XDG_DATA_HOME/rcal/rcal.db` (default `~/.local/share/rcal/rcal.db`).
 - Password resolution order: `password_command` (stdout = password) ->
   `RCAL_PASSWORD` env var -> interactive `rpassword` prompt.
@@ -125,7 +137,7 @@ local cache — a known limitation, handle it if the task surfaces it.
 
 ## Unit tests
 
-- 98 tests target: ical parsing/export, db CRUD, caldav XML parsing,
+- 101 tests target: ical parsing/export, db CRUD, caldav XML parsing,
   caldav DELETE, sync logic (`run_sync` in-memory), subscription
   logic (`apply_calendar`), delete-selection unit tests, week-grid
   layout, and wiremock end-to-end sync + push + delete tests.
@@ -176,8 +188,8 @@ Radicale quirks:
 - MKCOL of a calendar requires a resourcetype body (else 403).
 - With `--rights-type=owner_only`, read/write under `/alice/work/` works;
   `authenticated` only grants access at top-level paths.
-- Color is set via PROPPATCH of `calendar-color`; `rcal calendars` shows the
-  swatch.
+- Colors are not read from the server anymore: `rcal calendars` shows the
+  `[[calendar_colors]]` swatch from the config.
 
 ## Test fixtures
 

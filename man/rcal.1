@@ -80,11 +80,13 @@ Preview only; do not modify the database.
 .RE
 .TP
 .B sync
-Synchronize with the CalDAV server configured in the config file. Discovers
-calendars, pulls changes (adds, updates, deletions), pushes locally
-created events with an HTTP PUT, and refreshes any ICS subscriptions.
-Prints per-calendar and total counts of added, updated, unchanged, deleted
-and pushed events.
+Synchronize with every CalDAV server configured in the config file. For each
+account under
+.B [[servers]]
+it discovers calendars, pulls changes (adds, updates, deletions), and pushes
+locally created events with an HTTP PUT; it then refreshes any ICS
+subscriptions sequentially. Prints per-calendar counts of added, updated,
+unchanged, deleted and pushed events.
 .TP
 .B new
 Create a new event. When run interactively (a TTY), missing values are
@@ -142,7 +144,7 @@ Delete without confirmation.
 .RE
 .TP
 .B calendars
-List available calendars with their color swatches and event counts.
+List available calendars with their config color swatches and event counts.
 .TP
 .B subscribe
 Subscribe to an online ICS calendar feed and cache it locally, so its events
@@ -156,15 +158,16 @@ Display name for the subscription (defaults to the feed host).
 .RE
 .TP
 .B add-account
-Add a CalDAV account by creating a config file at the default location.
-When run interactively (a TTY), the server URL, username and optional
-password command are prompted for. When run non-interactively,
+Add a CalDAV account to the config file at the default location. When run
+interactively (a TTY), the server URL, username and optional password command
+are prompted for. When run non-interactively,
 .B \-\-url
 and
 .B \-\-username
-are required. Refuses to overwrite an existing config unless
-.B \-\-force
-(or explicit interactive confirmation) is given.
+are required. The account is appended to any existing
+.B [[servers]]
+entries; a duplicate URL is rejected. When no config exists yet, one is
+created.
 .TP
 .RS
 .IP "\fB\-u, \-\-url\fR \fIURL\fR"
@@ -174,7 +177,7 @@ CalDAV username.
 .IP "\fB\-\-password-command\fR \fICOMMAND\fR"
 Shell command whose stdout is the password.
 .IP "\fB\-f, \-\-force\fR"
-Overwrite an existing config file.
+Skip the confirmation prompt.
 .RE
 .SH CONFIGURATION
 .B rcal
@@ -186,13 +189,17 @@ Create it with
 .B "rcal add-account"
 or
 .B "rcal subscribe"
-(see COMMANDS) or by hand. A
-.B server
-section is only needed for CalDAV synchronization; a subscription-only setup
-works without one.
+(see COMMANDS) or by hand. At least one
+.B [[servers]]
+entry or
+.B [[subscriptions]]
+entry is needed for a useful setup; several accounts and feeds may be
+configured, and a legacy single
+.B [server]
+table is still accepted.
 .PP
 .nf
-[server]
+[[servers]]
 url = "https://dav.example.com/"
 username = "alice"
 password_command = "pass show caldav/alice"
@@ -217,20 +224,19 @@ url = "https://example.com/holidays.ics"
 .fi
 .PP
 The
-.B server
-and
 .B display
-tables and the
+table and the
+.B servers ,
 .B subscriptions
 and
 .B calendar_colors
 lists are optional and their values fall back to the defaults shown above.
 .B accent_color
 is the \fI#RRGGBB\fR terminal color used to accent event summaries; events
-belonging to a calendar with its own color use that calendar's color
-instead. A calendar that has no explicit color is assigned a random
-distinct palette color on first sync, so every calendar defaults to a
-different accent.
+belonging to a calendar with a
+.B [[calendar_colors]] 
+entry use that calendar's color instead. Calendar colors are read from this
+config file at display time and are never stored in the database.
 .PP
 To set a specific color for a calendar, add a
 .B [[calendar_colors]]
@@ -242,9 +248,9 @@ name = "Work"
 color = "#e6194b"
 .fi
 .PP
-Such an entry overrides both a color announced by the server and the random
-palette default. Removing the entry leaves the calendar's current color in
-place. Each subscribed feed appears as its own entry under
+Removing the entry falls back to
+.BR accent_color .
+Each subscribed feed appears as its own entry under
 .BR subscriptions .
 .SH ENVIRONMENT
 .TP
@@ -301,7 +307,7 @@ $ rcal new --title "Design review" --date 2026-03-02 --time 14:00 \\
            --location "Room 3" --calendar "http://dav.example.com/alice/work/"
 .fi
 .PP
-Subscribe to a read-only ICS feed and synchronize with the CalDAV server:
+Subscribe to a read-only ICS feed and pull in every configured account:
 .nf
 $ rcal subscribe --name Holidays https://example.com/holidays.ics
 $ rcal sync

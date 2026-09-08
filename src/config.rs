@@ -3,23 +3,63 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 pub struct Config {
-    /// CalDAV account. Absent when the user only has ICS subscriptions.
-    pub server: Option<ServerConfig>,
-    #[serde(default)]
+    /// CalDAV accounts. Empty when the user only has ICS subscriptions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub servers: Vec<ServerConfig>,
+    #[serde(default, skip_serializing_if = "DisplayConfig::is_default")]
     pub display: DisplayConfig,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "CalendarsConfig::is_default")]
     pub calendars: CalendarsConfig,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "NotificationsConfig::is_default")]
     pub notifications: NotificationsConfig,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subscriptions: Vec<IcsSubscription>,
-    /// Per-calendar color overrides, matched on calendar name. When present
-    /// these win over both a server-provided color and the random palette
-    /// default.
-    #[serde(default)]
+    /// Per-calendar color overrides, matched on calendar name. This is the
+    /// only source of calendar colors; they are applied when displaying
+    /// events and never stored in the database.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub calendar_colors: Vec<CalendarColorEntry>,
+}
+
+impl<'de> Deserialize<'de> for Config {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            /// Legacy single-server `[server]` section. Migrated into
+            /// `servers` so existing config files keep working.
+            server: Option<ServerConfig>,
+            #[serde(default)]
+            servers: Vec<ServerConfig>,
+            #[serde(default)]
+            display: DisplayConfig,
+            #[serde(default)]
+            calendars: CalendarsConfig,
+            #[serde(default)]
+            notifications: NotificationsConfig,
+            #[serde(default)]
+            subscriptions: Vec<IcsSubscription>,
+            #[serde(default)]
+            calendar_colors: Vec<CalendarColorEntry>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let mut servers = raw.servers;
+        if let Some(legacy) = raw.server {
+            servers.insert(0, legacy);
+        }
+        Ok(Config {
+            servers,
+            display: raw.display,
+            calendars: raw.calendars,
+            notifications: raw.notifications,
+            subscriptions: raw.subscriptions,
+            calendar_colors: raw.calendar_colors,
+        })
+    }
 }
 
 /// A read-only online ICS calendar that rcal fetches and caches locally.
@@ -47,6 +87,15 @@ pub struct ServerConfig {
     /// Command to execute that prints password to stdout
     #[serde(default)]
     pub password_command: Option<String>,
+}
+
+impl DisplayConfig {
+    fn is_default(&self) -> bool {
+        self.default_view == default_view()
+            && self.time_format == default_time_format()
+            && self.color_scheme == default_color_scheme()
+            && self.accent_color.is_none()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -93,12 +142,25 @@ pub struct CalendarsConfig {
     pub hide: Vec<String>,
 }
 
+impl CalendarsConfig {
+    fn is_default(&self) -> bool {
+        self.show.is_empty() && self.hide.is_empty()
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NotificationsConfig {
     #[serde(default = "default_notifications_enabled")]
     pub enabled: bool,
     #[serde(default = "default_reminder_minutes")]
     pub reminder_minutes: Vec<u32>,
+}
+
+impl NotificationsConfig {
+    fn is_default(&self) -> bool {
+        self.enabled == default_notifications_enabled()
+            && self.reminder_minutes == default_reminder_minutes()
+    }
 }
 
 impl Default for NotificationsConfig {
@@ -121,7 +183,7 @@ fn default_reminder_minutes() -> Vec<u32> {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            server: None,
+            servers: Vec::new(),
             display: DisplayConfig::default(),
             calendars: CalendarsConfig::default(),
             notifications: NotificationsConfig::default(),
@@ -132,18 +194,21 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Build a config from CalDAV server credentials
+    /// Convenience builder for tests: a config with a single CalDAV server
+    /// account. Production flows (`rcal add-account`) start from
+    /// `Config::default()` and push onto `servers`.
+    #[cfg(test)]
     pub fn new(
         url: impl Into<String>,
         username: impl Into<String>,
         password_command: Option<String>,
     ) -> Self {
         Self {
-            server: Some(ServerConfig {
+            servers: vec![ServerConfig {
                 url: url.into(),
                 username: username.into(),
                 password_command,
-            }),
+            }],
             display: DisplayConfig::default(),
             calendars: CalendarsConfig::default(),
             notifications: NotificationsConfig::default(),
@@ -268,7 +333,8 @@ mod tests {
         config.write_to(&path).unwrap();
 
         let loaded = Config::load_from(&path).unwrap();
-        let server = loaded.server.as_ref().unwrap();
+        assert_eq!(loaded.servers.len(), 1);
+        let server = &loaded.servers[0];
         assert_eq!(server.url, "https://dav.example.com/");
         assert_eq!(server.username, "alice");
         assert_eq!(server.password_command.as_deref(), Some("pass show caldav"));
@@ -285,7 +351,8 @@ mod tests {
             .unwrap();
 
         let loaded = Config::load_from(&path).unwrap();
-        assert_eq!(loaded.server.as_ref().unwrap().password_command, None);
+        assert_eq!(loaded.servers.len(), 1);
+        assert_eq!(loaded.servers[0].password_command, None);
 
         std::fs::remove_file(&path).ok();
     }
@@ -346,15 +413,18 @@ mod tests {
     }
 
     #[test]
-    fn test_default_config_has_no_server() {
+    fn test_default_config_has_no_servers() {
         let config = Config::default();
-        assert!(config.server.is_none());
+        assert!(config.servers.is_empty());
 
         let content = toml::to_string(&config).unwrap();
-        assert!(!content.contains("[server]"), "server section must be omitted");
+        assert!(
+            !content.contains("[[servers]]"),
+            "server sections must be omitted"
+        );
 
         let loaded: Config = toml::from_str(&content).unwrap();
-        assert!(loaded.server.is_none());
+        assert!(loaded.servers.is_empty());
     }
 
     #[test]
@@ -370,10 +440,75 @@ mod tests {
         config.write_to(&path).unwrap();
 
         let loaded = Config::load_from(&path).unwrap();
-        assert!(loaded.server.is_none());
+        assert!(loaded.servers.is_empty());
         assert_eq!(loaded.subscriptions.len(), 1);
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_multiple_servers_roundtrip() {
+        let path = temp_config_path();
+        let mut config = Config::default();
+        config.servers = vec![
+            ServerConfig {
+                url: "https://dav.one.example/".to_string(),
+                username: "alice".to_string(),
+                password_command: None,
+            },
+            ServerConfig {
+                url: "https://dav.two.example/".to_string(),
+                username: "bob".to_string(),
+                password_command: Some("pass show bob".to_string()),
+            },
+        ];
+        config.write_to(&path).unwrap();
+
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.servers.len(), 2);
+        assert_eq!(loaded.servers[0].url, "https://dav.one.example/");
+        assert_eq!(loaded.servers[1].url, "https://dav.two.example/");
+        assert_eq!(loaded.servers[1].username, "bob");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_legacy_server_section_still_loads() {
+        // Configs written before multiple servers were supported use a single
+        // `[server]` table; they must load as a one-element `servers` list.
+        let content = r#"
+[server]
+url = "https://legacy.example/"
+username = "alice"
+password_command = "echo secret"
+
+[[subscriptions]]
+name = "Holidays"
+url = "https://example.com/holidays.ics"
+"#;
+        let loaded: Config = toml::from_str(content).unwrap();
+        assert_eq!(loaded.servers.len(), 1);
+        assert_eq!(loaded.servers[0].url, "https://legacy.example/");
+        assert_eq!(loaded.servers[0].username, "alice");
+        assert_eq!(loaded.subscriptions.len(), 1);
+    }
+
+    #[test]
+    fn test_legacy_server_merges_with_new_servers() {
+        let content = r#"
+[server]
+url = "https://legacy.example/"
+username = "alice"
+
+[[servers]]
+url = "https://modern.example/"
+username = "bob"
+"#;
+        let loaded: Config = toml::from_str(content).unwrap();
+        assert_eq!(loaded.servers.len(), 2);
+        assert_eq!(loaded.servers[0].url, "https://legacy.example/");
+        assert_eq!(loaded.servers[1].url, "https://modern.example/");
     }
 
     #[test]

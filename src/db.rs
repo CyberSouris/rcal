@@ -6,13 +6,6 @@ use std::path::Path;
 use crate::config::Config;
 use crate::ical::CalendarEvent;
 
-/// Distinct palette from which calendars without their own color draw a
-/// default. Colors are persisted to `calendars.color` on insert.
-const CALENDAR_COLORS: [&str; 12] = [
-    "#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4", "#42d4f4",
-    "#f032e6", "#9a6324", "#808000", "#469990", "#aaffc3", "#ffe119",
-];
-
 /// Raw event row as stored in the database, including sync metadata
 #[derive(Debug)]
 pub struct StoredEvent {
@@ -97,7 +90,6 @@ impl Database {
                 CREATE TABLE IF NOT EXISTS calendars (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
-                    color TEXT,
                     ctag TEXT,
                     sync_token TEXT
                 );
@@ -129,6 +121,15 @@ impl Database {
             self.migrate_legacy_events()?;
         }
         self.ensure_event_column("url")?;
+
+        // Older databases stored a per-calendar color in `calendars.color`.
+        // Colors now come from the config file and are applied at display
+        // time, so the obsolete column is dropped.
+        if self.column_exists("calendars", "color")? {
+            self.conn
+                .execute_batch("ALTER TABLE calendars DROP COLUMN color")
+                .context("Failed to drop obsolete color column from calendars")?;
+        }
 
         // Events are keyed per (calendar_id, uid) so that the same UID in two
         // calendars does not collide.
@@ -204,14 +205,19 @@ impl Database {
         Ok(())
     }
 
+    /// Whether `table` currently has a `column`.
+    fn column_exists(&self, table: &str, column: &str) -> Result<bool> {
+        let mut stmt =
+            self.conn
+                .prepare(&format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"))?;
+        let count: i64 = stmt.query_row(params![column], |row| row.get(0))?;
+        Ok(count > 0)
+    }
+
     /// Add a column to the events table if it is missing (handles databases
     /// created by older versions of rcal).
     fn ensure_event_column(&self, column: &str) -> Result<()> {
-        let mut stmt = self.conn.prepare(
-            "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name = ?1",
-        )?;
-        let count: i64 = stmt.query_row(params![column], |row| row.get(0))?;
-        if count == 0 {
+        if !self.column_exists("events", column)? {
             self.conn.execute(
                 &format!("ALTER TABLE events ADD COLUMN {} TEXT", column),
                 [],
@@ -222,61 +228,16 @@ impl Database {
 
     // --- Calendar operations ---
 
-    /// Insert a calendar. When `color` is `None` (the server or subscription
-    /// has no color of its own), a random palette color not already in use by
-    /// another calendar is chosen and persisted, so every calendar defaults
-    /// to a distinct accent. Re-inserting a calendar keeps its previously
-    /// assigned color; an explicit color always wins.
-    pub fn insert_calendar(&self, id: &str, name: &str, color: Option<&str>) -> Result<()> {
-        let color = match color {
-            Some(c) => Some(c.to_string()),
-            None => {
-                let existing: Option<String> = self
-                    .conn
-                    .query_row(
-                        "SELECT color FROM calendars WHERE id = ?1",
-                        params![id],
-                        |r| r.get(0),
-                    )
-                    .unwrap_or(None);
-                match existing {
-                    Some(c) if !c.is_empty() => Some(c),
-                    _ => Some(self.unused_calendar_color()?),
-                }
-            }
-        };
+    /// Insert (or replace) a calendar by id and name. Calendar colors are not
+    /// tracked here: they are read from the config file and applied when
+    /// events are displayed.
+    pub fn insert_calendar(&self, id: &str, name: &str) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO calendars (id, name, color)
-             VALUES (?1, ?2, ?3)",
-            params![id, name, color],
+            "INSERT OR REPLACE INTO calendars (id, name)
+             VALUES (?1, ?2)",
+            params![id, name],
         )?;
         Ok(())
-    }
-
-    /// The first palette color not yet assigned to any calendar, so re-runs
-    /// pick a different starting point. Falls back to a palette color when
-    /// every one is already in use by some calendar.
-    fn unused_calendar_color(&self) -> Result<String> {
-        let mut used: Vec<String> = Vec::new();
-        let mut stmt = self.conn.prepare(
-            "SELECT color FROM calendars WHERE color IS NOT NULL AND color != ''",
-        )?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        for row in rows {
-            used.push(row?);
-        }
-
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos() as usize)
-            .unwrap_or(0);
-        for i in 0..CALENDAR_COLORS.len() {
-            let color = CALENDAR_COLORS[(seed + i) % CALENDAR_COLORS.len()];
-            if !used.iter().any(|u| u == color) {
-                return Ok(color.to_string());
-            }
-        }
-        Ok(CALENDAR_COLORS[seed % CALENDAR_COLORS.len()].to_string())
     }
 
     /// Get all calendars
@@ -284,7 +245,7 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT c.id, c.name, c.color,
+                "SELECT c.id, c.name,
                         COUNT(e.uid) as event_count
                  FROM calendars c
                  LEFT JOIN events e ON e.calendar_id = c.id
@@ -296,8 +257,7 @@ impl Database {
             Ok(Calendar {
                 id: row.get(0)?,
                 name: row.get(1)?,
-                color: row.get(2)?,
-                event_count: row.get::<_, i64>(3)? as usize,
+                event_count: row.get::<_, i64>(2)? as usize,
             })
         })?;
 
@@ -610,7 +570,6 @@ fn map_event_row(row: &rusqlite::Row) -> rusqlite::Result<CalendarEvent> {
 pub struct Calendar {
     pub id: String,
     pub name: String,
-    pub color: Option<String>,
     pub event_count: usize,
 }
 
@@ -762,8 +721,8 @@ mod tests {
     #[test]
     fn test_same_uid_in_multiple_calendars_is_scoped() {
         let db = test_db();
-        db.insert_calendar("cal-a", "Alpha", None).unwrap();
-        db.insert_calendar("cal-b", "Bravo", None).unwrap();
+        db.insert_calendar("cal-a", "Alpha").unwrap();
+        db.insert_calendar("cal-b", "Bravo").unwrap();
         let e = event("uid-shared", "Shared", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0));
         db.insert_event(&e, Some("cal-a"), None, None).unwrap();
         db.insert_event(&e, Some("cal-b"), None, None).unwrap();
@@ -939,8 +898,8 @@ mod tests {
     #[test]
     fn test_insert_calendar_and_get_all() {
         let db = test_db();
-        db.insert_calendar("cal-1", "Personal", Some("#ff0000")).unwrap();
-        db.insert_calendar("cal-2", "Work", Some("#00ff00")).unwrap();
+        db.insert_calendar("cal-1", "Personal").unwrap();
+        db.insert_calendar("cal-2", "Work").unwrap();
 
         let calendars = db.get_calendars().unwrap();
         assert_eq!(calendars.len(), 2);
@@ -948,16 +907,13 @@ mod tests {
         // Ordered by name: Personal, Work
         assert_eq!(calendars[0].name, "Personal");
         assert_eq!(calendars[1].name, "Work");
-
-        assert_eq!(calendars[0].color.as_deref(), Some("#ff0000"));
-        assert_eq!(calendars[1].color.as_deref(), Some("#00ff00"));
     }
 
     #[test]
     fn test_insert_calendar_replaces_existing() {
         let db = test_db();
-        db.insert_calendar("cal-1", "Personal", None).unwrap();
-        db.insert_calendar("cal-1", "Personal Updated", None).unwrap();
+        db.insert_calendar("cal-1", "Personal").unwrap();
+        db.insert_calendar("cal-1", "Personal Updated").unwrap();
 
         let calendars = db.get_calendars().unwrap();
         assert_eq!(calendars.len(), 1);
@@ -965,47 +921,82 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_calendar_assigns_distinct_colors_by_default() {
+    fn test_calendars_have_no_stored_color() {
         let db = test_db();
-        for (id, name) in [
-            ("cal-a", "Alpha"),
-            ("cal-b", "Bravo"),
-            ("cal-c", "Gamma"),
-            ("cal-d", "Delta"),
-        ] {
-            db.insert_calendar(id, name, None).unwrap();
-        }
+        db.insert_calendar("cal-a", "Alpha").unwrap();
 
         let cals = db.get_calendars().unwrap();
-        assert_eq!(cals.len(), 4);
-        let mut seen = std::collections::HashSet::new();
-        for c in &cals {
-            let color = c.color.as_deref().expect("default color assigned");
-            assert!(color.starts_with('#'), "expected #RRGGBB, got {color}");
-            assert!(
-                seen.insert(color.to_string()),
-                "every calendar must get a distinct default color"
-            );
-        }
+        assert_eq!(cals.len(), 1);
+        assert_eq!(cals[0].name, "Alpha");
+
+        // The obsolete color column is dropped on open.
+        let has_color: i64 = {
+            let conn = &db.conn;
+            let mut stmt = conn
+                .prepare("SELECT COUNT(*) FROM pragma_table_info('calendars') WHERE name = 'color'")
+                .unwrap();
+            stmt.query_row([], |row| row.get(0)).unwrap()
+        };
+        assert_eq!(has_color, 0, "calendars.color must not exist");
     }
 
     #[test]
-    fn test_insert_calendar_keeps_assigned_default_color() {
-        let db = test_db();
-        db.insert_calendar("cal-a", "Alpha", None).unwrap();
-        let first = db.get_calendars().unwrap()[0].color.clone();
+    fn test_open_drops_color_column_from_previous_db() {
+        let path = std::env::temp_dir().join(format!("rcal-color-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "
+                CREATE TABLE calendars (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    color TEXT,
+                    ctag TEXT,
+                    sync_token TEXT
+                );
+                CREATE TABLE events (
+                    uid TEXT NOT NULL,
+                    calendar_id TEXT REFERENCES calendars(id),
+                    summary TEXT,
+                    description TEXT,
+                    location TEXT,
+                    url TEXT,
+                    dtstart DATETIME,
+                    dtend DATETIME,
+                    all_day BOOLEAN DEFAULT FALSE,
+                    status TEXT,
+                    recurrence TEXT,
+                    ical_data TEXT,
+                    etag TEXT,
+                    last_modified DATETIME,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    synced_at DATETIME
+                );
+                INSERT INTO calendars (id, name, color) VALUES ('cal-a', 'Old', '#ff0000');
+                INSERT INTO events (uid, calendar_id, summary, dtstart, dtend)
+                    VALUES ('uid-1', 'cal-a', 'Old Event', '2024-01-15T09:00:00+00:00', '2024-01-15T10:00:00+00:00');
+                ",
+            )
+            .unwrap();
+        }
 
-        // Re-inserting without a color (e.g. on the next sync, when the
-        // server still has no color) must not churn the assigned color.
-        db.insert_calendar("cal-a", "Alpha renamed", None).unwrap();
-        let cals = db.get_calendars().unwrap();
-        assert_eq!(cals[0].name, "Alpha renamed");
-        assert_eq!(cals[0].color, first);
+        let db = Database::open_from(&path).unwrap();
+        let has_color: i64 = {
+            let conn = &db.conn;
+            let mut stmt = conn
+                .prepare("SELECT COUNT(*) FROM pragma_table_info('calendars') WHERE name = 'color'")
+                .unwrap();
+            stmt.query_row([], |row| row.get(0)).unwrap()
+        };
+        assert_eq!(has_color, 0, "color column should be dropped");
 
-        // An explicit color always wins over the assigned default.
-        db.insert_calendar("cal-a", "Alpha", Some("#123456")).unwrap();
-        let cals = db.get_calendars().unwrap();
-        assert_eq!(cals[0].color.as_deref(), Some("#123456"));
+        let stored = db.get_events_for_calendar("cal-a").unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].event.summary, "Old Event");
+
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
@@ -1037,7 +1028,7 @@ mod tests {
     #[test]
     fn test_get_stored_events_for_day_includes_metadata() {
         let db = test_db();
-        db.insert_calendar("cal-a", "Alpha", None).unwrap();
+        db.insert_calendar("cal-a", "Alpha").unwrap();
 
         let morning = chrono::Local
             .with_ymd_and_hms(2024, 1, 15, 9, 0, 0)
