@@ -296,12 +296,13 @@ pub fn render_week(events: &[ColoredEvent], start_date: NaiveDate, agenda: bool)
         .collect();
     placed.sort_by_key(|p| p.event.dtstart);
 
-    // Assign each event to a grid row. Same-day events never share a row, and
-    // at least one empty row is left between same-day events that do not
-    // follow each other (i.e. the previous one ends before the next one
-    // starts). Events on different days only share a row when they start at
-    // the same time.
-    let mut rows: Vec<Vec<Option<usize>>> = Vec::new();
+    // Assign each event to a grid row. A cell (one per day per row) holds
+    // every event that starts at the exact same instant, so same-day events
+    // that start at the same time share a cell. Same-day events that start at
+    // different times never share a row, and at least one empty row is left
+    // between same-day events that do not follow each other (i.e. the
+    // previous one ends before the next one starts).
+    let mut rows: Vec<Vec<Vec<usize>>> = Vec::new();
     let mut last_on_day = [None; 7]; // most recently placed event per day
     for (idx, p) in placed.iter().enumerate() {
         let start = p.event.dtstart;
@@ -310,8 +311,12 @@ pub fn render_week(events: &[ColoredEvent], start_date: NaiveDate, agenda: bool)
             if let Some(prev) = last_on_day[d] {
                 let prev_row = rows
                     .iter()
-                    .position(|r| r[d] == Some(prev))
+                    .position(|r| r[d].contains(&prev))
                     .unwrap_or(0);
+                // Events with the same start instant may share a cell.
+                if placed[prev].event.dtstart.is_some() && placed[prev].event.dtstart == start {
+                    continue;
+                }
                 let gap = match (placed[prev].event.dtend, start) {
                     (Some(prev_end), Some(s)) => s > prev_end,
                     _ => false,
@@ -319,26 +324,30 @@ pub fn render_week(events: &[ColoredEvent], start_date: NaiveDate, agenda: bool)
                 min_row = min_row.max(if gap { prev_row + 2 } else { prev_row + 1 });
             }
         }
-        // Prefer a row that already holds events starting at the same time.
+        // Prefer a row that already holds events starting at the same instant.
         let mut row = (min_row..rows.len())
-            .find(|&r| rows[r].iter().flatten().any(|&i| placed[i].event.dtstart == start))
+            .find(|&r| {
+                rows[r]
+                    .iter()
+                    .flatten()
+                    .all(|&i| placed[i].event.dtstart.is_some() && placed[i].event.dtstart == start)
+            })
             .unwrap_or(min_row);
         loop {
             while rows.len() <= row {
-                rows.push(vec![None; 7]);
+                rows.push(vec![Vec::new(); 7]);
             }
-            let free = (p.first_day..=p.last_day).all(|d| rows[row][d].is_none());
             let same_start = rows[row]
                 .iter()
                 .flatten()
-                .all(|&i| placed[i].event.dtstart == start);
-            if free && same_start {
+                .all(|&i| placed[i].event.dtstart.is_some() && placed[i].event.dtstart == start);
+            if same_start {
                 break;
             }
             row += 1;
         }
         for d in p.first_day..=p.last_day {
-            rows[row][d] = Some(idx);
+            rows[row][d].push(idx);
             last_on_day[d] = Some(idx);
         }
     }
@@ -349,23 +358,24 @@ pub fn render_week(events: &[ColoredEvent], start_date: NaiveDate, agenda: bool)
     }
 
     for row in &rows {
-        // Wrap each cell's text into up to MAX_LINES physical rows.
+        // Wrap each cell's text into up to MAX_LINES physical rows. A cell
+        // may hold several events that start at the same instant; each event
+        // is rendered on its own line(s), colored with its own accent.
         let mut columns: Vec<Vec<String>> = Vec::with_capacity(7);
-        let mut column_colors: Vec<Option<String>> = Vec::with_capacity(7);
         let mut height = 1usize;
-        for (d, cell) in row.iter().enumerate() {
-            column_colors.push(
-                cell.as_ref()
-                    .map(|idx| placed[*idx].event.color.clone())
-                    .flatten(),
-            );
-            let text = match cell {
-                Some(idx) => {
-                    let p = &placed[*idx];
-                    let summary = sanitize(&p.event.summary);
-                    if d == p.first_day && !p.event.all_day {
-                        if let Some(start) = p.event.dtstart {
-                            let time = start.with_timezone(&Local).format("%H:%M");
+        for (d, cell_events) in row.iter().enumerate() {
+            // Collect (plain line, color) for every event in the cell, then
+            // cap the combined lines at MAX_LINES before colorizing.
+            let mut parts: Vec<(String, Option<&str>)> = Vec::new();
+            for (n, &idx) in cell_events.iter().enumerate() {
+                let p = &placed[idx];
+                let summary = sanitize(&p.event.summary);
+                let text = if d == p.first_day && !p.event.all_day {
+                    if let Some(start) = p.event.dtstart {
+                        let time = start.with_timezone(&Local).format("%H:%M");
+                        // All events in a merged cell share the same start
+                        // time, so only prefix it on the first one.
+                        if n == 0 {
                             format!("{} {}", time, summary)
                         } else {
                             summary
@@ -373,14 +383,29 @@ pub fn render_week(events: &[ColoredEvent], start_date: NaiveDate, agenda: bool)
                     } else {
                         summary
                     }
+                } else {
+                    summary
+                };
+                for line in wrap_cell(&text, COL_WIDTH, MAX_LINES) {
+                    parts.push((line, p.event.color.as_deref()));
                 }
-                None => String::new(),
-            };
-            let cell_lines = if text.is_empty() {
-                vec![String::new()]
-            } else {
-                wrap_cell(&text, COL_WIDTH, MAX_LINES)
-            };
+            }
+            let overflow = parts.len() > MAX_LINES;
+            parts.truncate(MAX_LINES);
+            if overflow {
+                let (last, _) = parts.last_mut().unwrap();
+                if last.chars().count() >= COL_WIDTH {
+                    last.pop();
+                }
+                last.push('…');
+            }
+            let mut cell_lines: Vec<String> = parts
+                .iter()
+                .map(|(line, color)| colorize(line, *color))
+                .collect();
+            if cell_lines.is_empty() {
+                cell_lines.push(String::new());
+            }
             height = height.max(cell_lines.len());
             columns.push(cell_lines);
         }
@@ -395,10 +420,7 @@ pub fn render_week(events: &[ColoredEvent], start_date: NaiveDate, agenda: bool)
                 let cell = if cell_line.trim().is_empty() {
                     " ".repeat(COL_WIDTH)
                 } else {
-                    pad_to_width(
-                        &colorize(cell_line, column_colors[d].as_deref()),
-                        COL_WIDTH,
-                    )
+                    pad_to_width(cell_line, COL_WIDTH)
                 };
                 line.push_str(&cell);
             }
@@ -903,6 +925,54 @@ mod tests {
         let i2 = lines.iter().position(|l| l.contains("Wednesday")).unwrap();
         // Different days with different start times must not share a row.
         assert_ne!(i1, i2);
+    }
+
+    #[test]
+    fn test_render_week_same_start_shares_cell() {
+        let monday = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let start = Local.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).single().unwrap();
+        let end1 = start + chrono::Duration::minutes(30);
+        let end2 = start + chrono::Duration::hours(1);
+        let events = vec![
+            local_event("Standup", start, end1),
+            local_event("Sync", start, end2),
+        ];
+
+        let output = render_week(&colored(events, None), monday, false);
+        // Both events land on the same grid row: the lines between two
+        // rule separators hold both summaries.
+        let blocks: Vec<&str> = output.split("----").collect();
+        let row = blocks
+            .iter()
+            .find(|b| b.contains("Standup"))
+            .expect("Standup rendered");
+        assert!(
+            row.contains("Sync"),
+            "same-day same-start events must share a cell:\n{}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_render_week_shares_cell_keeps_per_event_colors() {
+        let monday = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let start = Local.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).single().unwrap();
+        let end1 = start + chrono::Duration::minutes(30);
+        let end2 = start + chrono::Duration::hours(1);
+        let standup = ColoredEvent {
+            event: local_event("Standup", start, end1),
+            color: Some("#e6194b".to_string()),
+        };
+        let sync = ColoredEvent {
+            event: local_event("Sync", start, end2),
+            color: Some("#4363d8".to_string()),
+        };
+
+        let output = render_week(&[sync, standup], monday, false);
+        // Each event keeps its own color inside the shared cell; the time
+        // prefix is only printed once because both start at the same instant.
+        assert!(output.contains("\x1b[38;2;67;99;216m09:00 Sync\x1b[0m"));
+        assert!(output.contains("\x1b[38;2;230;25;75mStandup\x1b[0m"));
     }
 
     #[test]
