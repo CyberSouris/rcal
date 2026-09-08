@@ -87,7 +87,7 @@ enum Commands {
         dry_run: bool,
     },
 
-    /// Synchronize with CalDAV server
+    /// Synchronize with CalDAV server and refresh ICS subscriptions
     Sync,
 
     /// Create a new event
@@ -210,56 +210,58 @@ async fn main() -> anyhow::Result<()> {
         }) => handle_import(&file, add, dry_run),
         Some(Commands::Sync) => {
             let config = config::Config::load()?;
-            let server = config
-                .server
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!(
-                    "No CalDAV account configured. Run 'rcal add-account' to connect one,\n\
-                     or 'rcal subscribe <URL>' for an online ICS feed."
-                ))?;
-            let client = caldav::CalDavClient::new(&config)?;
-
-            println!("Discovering calendars at {} ...", server.url);
-            let calendars = client.discover_calendars().await?;
-            println!("Found {} calendar(s):", calendars.len());
-            for cal in &calendars {
-                let suffix = cal.color.as_deref().map(|c| format!(" [{}]", c)).unwrap_or_default();
-                println!(
-                    "  {} ({}){}",
-                    display::sanitize(&cal.name),
-                    display::sanitize(&cal.href),
-                    suffix
-                );
+            if config.server.is_none() && config.subscriptions.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "No CalDAV account or ICS subscription configured. Run 'rcal add-account' \
+                     to connect one, or 'rcal subscribe <URL>' for an online ICS feed."
+                ));
             }
-            println!();
-
             let db = db::Database::open()?;
-            let summary = client.sync(&db, &calendars).await?;
 
-            let mut total = 0usize;
-            for result in &summary.calendars {
+            if let Some(server) = config.server.as_ref() {
+                let client = caldav::CalDavClient::new(&config)?;
+
+                println!("Discovering calendars at {} ...", server.url);
+                let calendars = client.discover_calendars().await?;
+                println!("Found {} calendar(s):", calendars.len());
+                for cal in &calendars {
+                    let suffix = cal.color.as_deref().map(|c| format!(" [{}]", c)).unwrap_or_default();
+                    println!(
+                        "  {} ({}){}",
+                        display::sanitize(&cal.name),
+                        display::sanitize(&cal.href),
+                        suffix
+                    );
+                }
+                println!();
+
+                let summary = client.sync(&db, &calendars).await?;
+
+                let mut total = 0usize;
+                for result in &summary.calendars {
+                    println!(
+                        "  {}: +{} added, ~{} updated, {} unchanged, -{} deleted, ↑{} pushed",
+                        display::sanitize(&result.name),
+                        result.added,
+                        result.updated,
+                        result.unchanged,
+                        result.deleted,
+                        result.pushed
+                    );
+                    total += result.added + result.updated + result.unchanged + result.deleted;
+                }
+                println!();
                 println!(
-                    "  {}: +{} added, ~{} updated, {} unchanged, -{} deleted, ↑{} pushed",
-                    display::sanitize(&result.name),
-                    result.added,
-                    result.updated,
-                    result.unchanged,
-                    result.deleted,
-                    result.pushed
+                    "Sync complete: +{} added, ~{} updated, {} unchanged, -{} deleted, ↑{} pushed ({} events in {} calendars)",
+                    summary.total_added,
+                    summary.total_updated,
+                    summary.total_unchanged,
+                    summary.total_deleted,
+                    summary.total_pushed,
+                    total,
+                    summary.calendars.len(),
                 );
-                total += result.added + result.updated + result.unchanged + result.deleted;
             }
-            println!();
-            println!(
-                "Sync complete: +{} added, ~{} updated, {} unchanged, -{} deleted, ↑{} pushed ({} events in {} calendars)",
-                summary.total_added,
-                summary.total_updated,
-                summary.total_unchanged,
-                summary.total_deleted,
-                summary.total_pushed,
-                total,
-                summary.calendars.len(),
-            );
 
             if !config.subscriptions.is_empty() {
                 println!();
