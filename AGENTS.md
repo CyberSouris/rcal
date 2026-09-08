@@ -32,9 +32,12 @@ cargo test           # run the full suite (unit + mock-server tests)
 - One feature = one commit. When a change spans multiple logical features
   (example: `rcal new` then the CalDAV "put" push), split them into separate
   commits.
-- ONLY commit when the user explicitly asks. Before committing, inspect
-  `git status` and `git diff`, stage only intended files, and never stage
-  secrets.
+- Commit regularly: make a commit as soon as a feature or logical block of
+  work is done and verified — do not wait for an explicit request or hoard
+  unstaged changes across sessions.
+- Before committing, inspect `git status` and `git diff`, stage only intended
+  files, and never stage secrets. Commit only intended files; leave unrelated
+  pre-existing changes unstaged unless asked.
 - Never commit without reviewing the incoming diff.
 
 ## Workflow conventions
