@@ -125,10 +125,10 @@ local cache — a known limitation, handle it if the task surfaces it.
 
 ## Unit tests
 
-- 94 tests target: ical parsing/export, db CRUD, caldav XML parsing,
+- 98 tests target: ical parsing/export, db CRUD, caldav XML parsing,
   caldav DELETE, sync logic (`run_sync` in-memory), subscription
-  logic (`apply_calendar`), delete-selection unit tests, and
-  wiremock end-to-end sync + push + delete tests.
+  logic (`apply_calendar`), delete-selection unit tests, week-grid
+  layout, and wiremock end-to-end sync + push + delete tests.
   sync logic (`run_sync` in-memory), and a wiremock end-to-end sync + push
   test (`test_sync_pushes_local_events_against_mock_server`).
 - Run the suite after changes: `cargo test`.

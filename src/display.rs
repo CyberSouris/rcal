@@ -1,4 +1,4 @@
-use chrono::{Datelike, Days, Local, NaiveDate};
+use chrono::{Datelike, Days, Local, NaiveDate, Timelike};
 use std::collections::HashMap;
 
 use crate::ical::CalendarEvent;
@@ -296,59 +296,68 @@ pub fn render_week(events: &[ColoredEvent], start_date: NaiveDate, agenda: bool)
         .collect();
     placed.sort_by_key(|p| p.event.dtstart);
 
-    // Assign each event to a grid row. A cell (one per day per row) holds
-    // every event that starts at the exact same instant, so same-day events
-    // that start at the same time share a cell. Same-day events that start at
-    // different times never share a row, and at least one empty row is left
-    // between same-day events that do not follow each other (i.e. the
-    // previous one ends before the next one starts).
-    let mut rows: Vec<Vec<Vec<usize>>> = Vec::new();
-    let mut last_on_day = [None; 7]; // most recently placed event per day
-    for (idx, p) in placed.iter().enumerate() {
-        let start = p.event.dtstart;
-        let mut min_row = 0;
-        for d in p.first_day..=p.last_day {
-            if let Some(prev) = last_on_day[d] {
-                let prev_row = rows
-                    .iter()
-                    .position(|r| r[d].contains(&prev))
-                    .unwrap_or(0);
-                // Events with the same start instant may share a cell.
-                if placed[prev].event.dtstart.is_some() && placed[prev].event.dtstart == start {
-                    continue;
-                }
-                let gap = match (placed[prev].event.dtend, start) {
-                    (Some(prev_end), Some(s)) => s > prev_end,
-                    _ => false,
-                };
-                min_row = min_row.max(if gap { prev_row + 2 } else { prev_row + 1 });
-            }
-        }
-        // Prefer a row that already holds events starting at the same instant.
-        let mut row = (min_row..rows.len())
-            .find(|&r| {
-                rows[r]
-                    .iter()
-                    .flatten()
-                    .all(|&i| placed[i].event.dtstart.is_some() && placed[i].event.dtstart == start)
+    // Assign each event to a grid row. Rows form a wall-clock time axis
+    // across the whole week: an event that starts earlier in the day is
+    // always placed above one that starts later, regardless of which day
+    // they fall on, and events that start at the same time of day share a
+    // row even across days. Within a single day's column, at least one empty
+    // row is left between events where the earlier one ends before the next
+    // one starts; another day may still place events on that row.
+    let clock_of: Vec<Option<u32>> = placed
+        .iter()
+        .map(|p| {
+            p.event.dtstart.map(|d| {
+                let local = d.with_timezone(&Local);
+                local.hour() * 60 + local.minute()
             })
-            .unwrap_or(min_row);
-        loop {
-            while rows.len() <= row {
-                rows.push(vec![Vec::new(); 7]);
+        })
+        .collect();
+    let mut clocks: Vec<u32> = clock_of.iter().flatten().copied().collect();
+    clocks.sort_unstable();
+    clocks.dedup();
+    let mut rows: Vec<Vec<Vec<usize>>> = Vec::new();
+    let mut row_of_clock: HashMap<u32, usize> = HashMap::new();
+    let mut last_on_day: [Option<usize>; 7] = [None; 7]; // most recently placed event per day
+    let mut previous_row = None;
+    for clock in clocks {
+        // Strictly timewise: a later clock always lands below every earlier
+        // clock, plus per-day spacing for events that do not follow each
+        // other on the same day.
+        let mut min_row = previous_row.map(|r| r + 1).unwrap_or(0);
+        for (idx, p) in placed.iter().enumerate() {
+            if clock_of[idx] != Some(clock) {
+                continue;
             }
-            let same_start = rows[row]
-                .iter()
-                .flatten()
-                .all(|&i| placed[i].event.dtstart.is_some() && placed[i].event.dtstart == start);
-            if same_start {
-                break;
+            for d in p.first_day..=p.last_day {
+                if let Some(prev) = last_on_day[d] {
+                    // Same-day events at the same clock share a cell.
+                    if clock_of[prev] == Some(clock) {
+                        continue;
+                    }
+                    let prev_clock = clock_of[prev].unwrap();
+                    let prev_row = row_of_clock[&prev_clock];
+                    let gap = match (placed[prev].event.dtend, p.event.dtstart) {
+                        (Some(prev_end), Some(s)) => s > prev_end,
+                        _ => false,
+                    };
+                    min_row = min_row.max(if gap { prev_row + 2 } else { prev_row + 1 });
+                }
             }
-            row += 1;
         }
-        for d in p.first_day..=p.last_day {
-            rows[row][d].push(idx);
-            last_on_day[d] = Some(idx);
+        let row = min_row;
+        row_of_clock.insert(clock, row);
+        previous_row = Some(row);
+        while rows.len() <= row {
+            rows.push(vec![Vec::new(); 7]);
+        }
+        for (idx, p) in placed.iter().enumerate() {
+            if clock_of[idx] != Some(clock) {
+                continue;
+            }
+            for d in p.first_day..=p.last_day {
+                rows[row][d].push(idx);
+                last_on_day[d] = Some(idx);
+            }
         }
     }
 
@@ -908,7 +917,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_week_cross_day_events_do_not_share_rows() {
+    fn test_render_week_same_clock_shares_row_across_days() {
         let monday = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
         let start1 = Local.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).single().unwrap();
         let end1 = start1 + chrono::Duration::hours(1);
@@ -920,11 +929,68 @@ mod tests {
         ];
 
         let output = render_week(&colored(events, None), monday, false);
+        // Both events share the same grid row: the line block between two
+        // rule separators holds both summaries, even though they are on
+        // different days' columns (and may wrap to different line counts).
+        let blocks: Vec<&str> = output.split("----").collect();
+        let row = blocks
+            .iter()
+            .find(|b| b.contains("Monday"))
+            .expect("Monday rendered");
+        assert!(
+            row.contains("Wednesday"),
+            "same clock must share a row across days:\n{}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_render_week_orders_events_by_clock_not_day() {
+        let monday = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        // A later-day event that starts earlier in the morning must still
+        // appear above a week's earlier-day afternoon event.
+        let start1 = Local.with_ymd_and_hms(2024, 1, 15, 14, 0, 0).single().unwrap();
+        let end1 = start1 + chrono::Duration::hours(1);
+        let start2 = Local.with_ymd_and_hms(2024, 1, 17, 9, 0, 0).single().unwrap();
+        let end2 = start2 + chrono::Duration::hours(1);
+        let events = vec![
+            local_event("Afternoon", start1, end1),
+            local_event("Morning", start2, end2),
+        ];
+
+        let output = render_week(&colored(events, None), monday, false);
         let lines: Vec<&str> = output.lines().collect();
-        let i1 = lines.iter().position(|l| l.contains("Monday")).unwrap();
-        let i2 = lines.iter().position(|l| l.contains("Wednesday")).unwrap();
-        // Different days with different start times must not share a row.
-        assert_ne!(i1, i2);
+        let i1 = lines.iter().position(|l| l.contains("Afternoon")).unwrap();
+        let i2 = lines.iter().position(|l| l.contains("Morning")).unwrap();
+        // Earlier clock time wins, no matter which day the event falls on.
+        assert!(i2 < i1, "expected Morning above Afternoon:\n{}", output);
+    }
+
+    #[test]
+    fn test_render_week_gap_is_per_column() {
+        let monday = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        // Monday has a gap between 09:00 and 14:00; Tuesday fills that slot
+        // with a 10:00 event. The Monday column must still show the gap.
+        let m1 = Local.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).single().unwrap();
+        let m1e = m1 + chrono::Duration::hours(1);
+        let m2 = Local.with_ymd_and_hms(2024, 1, 15, 14, 0, 0).single().unwrap();
+        let m2e = m2 + chrono::Duration::hours(1);
+        let t1 = Local.with_ymd_and_hms(2024, 1, 16, 10, 0, 0).single().unwrap();
+        let t1e = t1 + chrono::Duration::hours(1);
+        let events = vec![
+            local_event("MonEarly", m1, m1e),
+            local_event("MonLate", m2, m2e),
+            local_event("TueFill", t1, t1e),
+        ];
+
+        let output = render_week(&colored(events, None), monday, false);
+        let lines: Vec<&str> = output.lines().collect();
+        let i1 = lines.iter().position(|l| l.contains("MonEarly")).unwrap();
+        let i2 = lines.iter().position(|l| l.contains("MonLate")).unwrap();
+        // The gap is preserved within Monday's column while Tuesday's event
+        // occupies the intermediate row.
+        assert!(i2 - i1 >= 4, "expected a gap row in the Monday column");
+        assert!(lines.iter().any(|l| l.contains("TueFill")));
     }
 
     #[test]
