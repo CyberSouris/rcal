@@ -147,10 +147,11 @@ async fn read_body_limited(resp: reqwest::Response) -> Result<String> {
 
 /// Truncate an error context string to `max` characters.
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max])
+        let end = s.char_indices().nth(max).map(|(i, _)| i).unwrap_or(s.len());
+        format!("{}...", &s[..end])
     }
 }
 
@@ -235,6 +236,17 @@ END:VCALENDAR";
         assert_eq!(calendars[0].name, "Holidays");
         assert_eq!(calendars[0].id, url);
         assert_eq!(calendars[0].event_count, 2);
+    }
+
+    #[test]
+    fn test_truncate_never_panics_on_multibyte() {
+        // 300 ASCII bytes + a 2-byte char = 302 bytes, 301 chars. The old
+        // byte-index truncation panicked here (byte 300 is mid-char).
+        let s = "a".repeat(300) + "é";
+        let t = truncate(&s, 300);
+        assert_eq!(t.chars().count(), 300 + 3);
+        assert!(t.starts_with(&"a".repeat(300)));
+        assert!(t.ends_with("..."));
     }
 
     #[test]
