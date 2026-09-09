@@ -209,7 +209,7 @@ pub fn render_event_details(event: &CalendarEvent, color: Option<&str>) -> Strin
 
     if let Some(description) = event.description.as_deref() {
         if !description.is_empty() {
-            let indented: String = description
+            let indented: String = sanitize_multiline(description)
                 .lines()
                 .map(|l| if l.is_empty() { "\n".to_string() } else { format!("      {}\n", l) })
                 .collect();
@@ -1108,6 +1108,19 @@ mod tests {
         assert!(output.contains("  Location:     Room 1"));
         assert!(output.contains("  Link:         https://example.com"));
         assert!(output.contains("  UID:          uid-Meeting"));
+    }
+
+    #[test]
+    fn test_render_event_details_sanitizes_description() {
+        let start = Local.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).single().unwrap();
+        let end = start + chrono::Duration::hours(1);
+        let mut event = local_event("Meeting", start, end);
+        event.description = Some("Line one\n\x1b]0;PWND\x1b[2J\x1b[H\x07 tail".to_string());
+        let output = render_event_details(&event, None);
+        assert!(output.contains("Line one"));
+        assert!(output.contains("tail"));
+        assert!(!output.contains('\x1b'), "ESC sequences must be stripped: {:?}", output);
+        assert!(!output.contains('\x07'), "BEL must be stripped");
     }
 
     #[test]
