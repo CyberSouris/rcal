@@ -161,6 +161,8 @@ impl CalDavClient {
         let password = resolve_password(server)?;
         let http = reqwest::Client::builder()
             .user_agent(concat!("rcal/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .read_timeout(std::time::Duration::from_secs(300))
             .build()
             .context("Failed to build HTTP client")?;
         Ok(Self {
@@ -177,6 +179,8 @@ impl CalDavClient {
         validate_scheme(base_url)?;
         let http = reqwest::Client::builder()
             .user_agent(concat!("rcal/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .read_timeout(std::time::Duration::from_secs(300))
             .build()
             .context("Failed to build HTTP client")?;
         Ok(Self {

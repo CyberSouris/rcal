@@ -34,6 +34,8 @@ pub async fn refresh_subscription(
 
     let http = reqwest::Client::builder()
         .user_agent(concat!("rcal/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .read_timeout(std::time::Duration::from_secs(300))
         .build()
         .context("Failed to build HTTP client")?;
 
