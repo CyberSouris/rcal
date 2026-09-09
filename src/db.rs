@@ -40,8 +40,11 @@ impl Database {
             .with_context(|| format!("Failed to open database: {}", path.display()))?;
 
         let db = Self { conn };
-        db.init_schema()?;
+        // Restrict the file to owner-only before any write so SQLite's
+        // rollback journal (created with the database file's mode) never
+        // exposes calendar data to other local users.
         db.secure_file_permissions(path, existed)?;
+        db.init_schema()?;
 
         Ok(db)
     }
