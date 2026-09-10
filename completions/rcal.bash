@@ -133,8 +133,8 @@ _rcal_flag_completion() {
 
     case "$subcmd" in
         today)      flags="--details --help -h" ;;
-        week)       flags="--date --help -d -h" ;;
-        month)      flags="--month --help -m -h" ;;
+        week)       flags="--date --next --agenda --details --help -d -h" ;;
+        month)      flags="--month --next --agenda --details --help -m -h" ;;
         show)       flags="--details --help -h" ;;
         import)     flags="--add --dry-run --help -h --no-interactive" ;;
         sync)       flags="--help -h" ;;

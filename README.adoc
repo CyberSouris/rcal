@@ -140,8 +140,8 @@ owns their calendar the next time you run `rcal sync`.
 `rcal today`:: Show today's events
 `rcal add-account [-u URL] [--username USER] [--password-command CMD] [-f]`:: Add a CalDAV account (appends to the config)
 `rcal subscribe URL [--name NAME]`:: Subscribe to an online ICS feed
-`rcal week [-D DATE]`:: Week overview (`YYYY-MM-DD`)
-`rcal month [-M MONTH]`:: Month overview (`YYYY-MM`)
+`rcal week [-d DATE] [--agenda|--details]`:: Week overview (`YYYY-MM-DD`)
+`rcal month [-m MONTH] [--agenda|--details]`:: Month overview (`YYYY-MM`)
 `rcal show DATE`:: Events for a specific date
 `rcal import FILE [--add] [--dry-run]`:: Import an `.ics` file
 `rcal sync`:: Synchronize with the configured CalDAV servers and ICS subscriptions

@@ -221,9 +221,15 @@ pub fn render_event_details(event: &CalendarEvent, color: Option<&str>) -> Strin
 }
 
 /// Format a week view (Monday-Sunday). Events are laid out in a grid with
-/// one column per day. When `agenda` is set, the full per-day listing is
-/// appended underneath.
-pub fn render_week(events: &[ColoredEvent], start_date: NaiveDate, agenda: bool) -> String {
+/// one column per day. When `agenda` or `details` is set, a day-by-day
+/// listing is appended underneath: `agenda` shows one compact time + summary
+/// line per event, `details` expands every event with [`render_event_details`].
+pub fn render_week(
+    events: &[ColoredEvent],
+    start_date: NaiveDate,
+    agenda: bool,
+    details: bool,
+) -> String {
     // Normalize to Monday
     let monday = start_date - Days::new(start_date.weekday().num_days_from_monday() as u64);
     let sunday = monday + Days::new(6);
@@ -438,43 +444,67 @@ pub fn render_week(events: &[ColoredEvent], start_date: NaiveDate, agenda: bool)
         output.push_str(&format!("{}\n", rule));
     }
 
-    if !agenda {
+    if !agenda && !details {
         return output;
     }
 
-    // Detailed day-by-day listing
-    for i in 0..7 {
-        let day = monday + Days::new(i);
-        let day_events: Vec<&ColoredEvent> = events
+    output.push_str(&render_day_listing(events, monday, sunday, details));
+    output
+}
+
+/// Render the day-by-day listing shared by the week and month views. Each day
+/// with events gets a labelled section. When `details` is set, every event is
+/// expanded with [`render_event_details`]; otherwise each event is a single
+/// compact time + summary line (with its location on the following line).
+fn render_day_listing(
+    events: &[ColoredEvent],
+    first: NaiveDate,
+    last: NaiveDate,
+    details: bool,
+) -> String {
+    let today = Local::now().date_naive();
+    let mut output = String::new();
+
+    let mut day = first;
+    while day <= last {
+        let mut day_events: Vec<&ColoredEvent> = events
             .iter()
             .filter(|e| event_on_date(&e.event, day))
             .collect();
-        if day_events.is_empty() {
-            continue;
-        }
-        let day_label = if day == today {
-            format!("Today ({}, {})", day.format("%B %e"), day.format("%Y"))
-        } else {
-            format!("{}, {}", day.format("%A %B %e"), day.format("%Y"))
-        };
-        output.push_str(&format!("\n{}\n", day_label));
-        output.push_str(&"-".repeat(day_label.len()));
-        output.push_str("\n");
+        if !day_events.is_empty() {
+            let day_label = if day == today {
+                format!("Today ({}, {})", day.format("%B %e"), day.format("%Y"))
+            } else {
+                format!("{}, {}", day.format("%A %B %e"), day.format("%Y"))
+            };
+            output.push_str(&format!("\n{}\n", day_label));
+            output.push_str(&"-".repeat(day_label.len()));
+            output.push_str("\n");
 
-        let mut sorted: Vec<&ColoredEvent> = day_events;
-        sorted.sort_by(|a, b| a.dtstart.cmp(&b.dtstart));
-        for event in sorted {
-            let time_str = format_event_time(&event.event);
-            output.push_str(&format!(
-                "  {:<22} {}\n",
-                time_str,
-                colorize(&sanitize(&event.summary), event.color.as_deref())
-            ));
+            day_events.sort_by(|a, b| a.dtstart.cmp(&b.dtstart));
+            if details {
+                for (i, event) in day_events.iter().enumerate() {
+                    if i > 0 {
+                        output.push_str("\n");
+                    }
+                    output.push_str(&render_event_details(&event.event, event.color.as_deref()));
+                }
+            } else {
+                for event in day_events {
+                    let time_str = format_event_time(&event.event);
+                    output.push_str(&format!(
+                        "  {:<22} {}\n",
+                        time_str,
+                        colorize(&sanitize(&event.summary), event.color.as_deref())
+                    ));
 
-            if let Some(location) = &event.location {
-                output.push_str(&format!("  {:<22}   at {}\n", "", sanitize(location)));
+                    if let Some(location) = &event.location {
+                        output.push_str(&format!("  {:<22}   at {}\n", "", sanitize(location)));
+                    }
+                }
             }
         }
+        day = day + Days::new(1);
     }
 
     output
@@ -538,8 +568,16 @@ fn wrap_cell(text: &str, width: usize, max_lines: usize) -> Vec<String> {
     broken
 }
 
-/// Format a month view (calendar grid)
-pub fn render_month(events: &[ColoredEvent], month: NaiveDate) -> String {
+/// Format a month view (calendar grid). When `agenda` or `details` is set, a
+/// day-by-day listing is appended underneath: `agenda` shows one compact
+/// time + summary line per event, `details` expands every event with
+/// [`render_event_details`].
+pub fn render_month(
+    events: &[ColoredEvent],
+    month: NaiveDate,
+    agenda: bool,
+    details: bool,
+) -> String {
     let year = month.year();
     let month_num = month.month();
 
@@ -615,6 +653,11 @@ pub fn render_month(events: &[ColoredEvent], month: NaiveDate) -> String {
         output.push_str("\n");
     }
 
+    if !agenda && !details {
+        return output;
+    }
+
+    output.push_str(&render_day_listing(events, first_day, days_in_month, details));
     output
 }
 
@@ -789,7 +832,7 @@ mod tests {
         let end = start + chrono::Duration::hours(1);
         let events = vec![local_event("Meeting", start, end)];
 
-        let output = render_week(&colored(events, None), monday, false);
+        let output = render_week(&colored(events, None), monday, false, false);
         assert!(output.contains("Week 3"));
         assert!(output.contains("Meeting"));
         // Grid mode does not show the detailed day listing.
@@ -803,11 +846,35 @@ mod tests {
         let end = start + chrono::Duration::hours(1);
         let events = vec![local_event("Meeting", start, end)];
 
-        let output = render_week(&colored(events, None), monday, true);
+        let output = render_week(&colored(events, None), monday, true, false);
         assert!(output.contains("Meeting"));
         // Agenda mode appends the detailed per-day listing.
         assert!(output.contains("January 15"));
         assert!(output.contains("09:00 - 10:00"));
+    }
+
+    #[test]
+    fn test_render_week_details_expands_each_event() {
+        let monday = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let start = Local.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).single().unwrap();
+        let end = start + chrono::Duration::hours(1);
+        let mut event = local_event("Planning", start, end);
+        event.description = Some("Bring slides\nSecond line".to_string());
+        event.location = Some("Room 4".to_string());
+        event.url = Some("https://example.test/planning".to_string());
+        let events = vec![event];
+
+        let details = render_week(&colored(events.clone(), None), monday, false, true);
+        assert!(details.contains("Planning"));
+        assert!(details.contains("  Location:     Room 4"));
+        assert!(details.contains("  Link:         https://example.test/planning"));
+        assert!(details.contains("Bring slides"));
+        assert!(details.contains("Second line"));
+
+        let agenda = render_week(&colored(events, None), monday, true, false);
+        assert!(agenda.contains("at Room 4"));
+        assert!(!agenda.contains("Bring slides"));
+        assert!(!agenda.contains("  Link:"));
     }
 
     #[test]
@@ -821,7 +888,7 @@ mod tests {
             events.push(local_event(&format!("Event-{}", i), start, end));
         }
 
-        let output = render_week(&colored(events, None), monday, false);
+        let output = render_week(&colored(events, None), monday, false, false);
         // Every day header appears; today is highlighted.
         assert!(output.contains("Mon 15"));
         assert!(output.contains("Sun 21"));
@@ -841,7 +908,7 @@ mod tests {
         let long = "08:00 Enterprise Architecture Design Review Workshop";
         let events = vec![local_event(long, start, end)];
 
-        let output = render_week(&colored(events, None), monday, false);
+        let output = render_week(&colored(events, None), monday, false, false);
         // Wrapped across multiple physical lines within the column.
         assert!(output.contains("Enterprise"));
         assert!(output.contains("Architecture"));
@@ -862,7 +929,7 @@ mod tests {
             local_event("Review", start2, end2),
         ];
 
-        let output = render_week(&colored(events, None), monday, false);
+        let output = render_week(&colored(events, None), monday, false, false);
         let lines: Vec<&str> = output.lines().collect();
         let i1 = lines.iter().position(|l| l.contains("Standup")).unwrap();
         let i2 = lines.iter().position(|l| l.contains("Review")).unwrap();
@@ -889,7 +956,7 @@ mod tests {
             local_event("Brief", start2, end2),
         ];
 
-        let output = render_week(&colored(events, None), monday, false);
+        let output = render_week(&colored(events, None), monday, false, false);
         let lines: Vec<&str> = output.lines().collect();
         let i1 = lines.iter().position(|l| l.contains("Standup")).unwrap();
         let i2 = lines.iter().position(|l| l.contains("Brief")).unwrap();
@@ -909,7 +976,7 @@ mod tests {
             local_event("Brief", start2, end2),
         ];
 
-        let output = render_week(&colored(events, None), monday, false);
+        let output = render_week(&colored(events, None), monday, false, false);
         let lines: Vec<&str> = output.lines().collect();
         let i1 = lines.iter().position(|l| l.contains("LongCall")).unwrap();
         let i2 = lines.iter().position(|l| l.contains("Brief")).unwrap();
@@ -928,7 +995,7 @@ mod tests {
             local_event("Wednesday", start2, end2),
         ];
 
-        let output = render_week(&colored(events, None), monday, false);
+        let output = render_week(&colored(events, None), monday, false, false);
         // Both events share the same grid row: the line block between two
         // rule separators holds both summaries, even though they are on
         // different days' columns (and may wrap to different line counts).
@@ -958,7 +1025,7 @@ mod tests {
             local_event("Morning", start2, end2),
         ];
 
-        let output = render_week(&colored(events, None), monday, false);
+        let output = render_week(&colored(events, None), monday, false, false);
         let lines: Vec<&str> = output.lines().collect();
         let i1 = lines.iter().position(|l| l.contains("Afternoon")).unwrap();
         let i2 = lines.iter().position(|l| l.contains("Morning")).unwrap();
@@ -983,7 +1050,7 @@ mod tests {
             local_event("TueFill", t1, t1e),
         ];
 
-        let output = render_week(&colored(events, None), monday, false);
+        let output = render_week(&colored(events, None), monday, false, false);
         let lines: Vec<&str> = output.lines().collect();
         let i1 = lines.iter().position(|l| l.contains("MonEarly")).unwrap();
         let i2 = lines.iter().position(|l| l.contains("MonLate")).unwrap();
@@ -1004,7 +1071,7 @@ mod tests {
             local_event("Sync", start, end2),
         ];
 
-        let output = render_week(&colored(events, None), monday, false);
+        let output = render_week(&colored(events, None), monday, false, false);
         // Both events land on the same grid row: the lines between two
         // rule separators hold both summaries.
         let blocks: Vec<&str> = output.split("----").collect();
@@ -1034,7 +1101,7 @@ mod tests {
             color: Some("#4363d8".to_string()),
         };
 
-        let output = render_week(&[sync, standup], monday, false);
+        let output = render_week(&[sync, standup], monday, false, false);
         // Each event keeps its own color inside the shared cell; the time
         // prefix is only printed once because both start at the same instant.
         assert!(output.contains("\x1b[38;2;67;99;216m09:00 Sync\x1b[0m"));
@@ -1078,9 +1145,36 @@ mod tests {
         let end = start + chrono::Duration::hours(1);
         let events = vec![local_event("Meeting", start, end)];
 
-        let output = render_month(&colored(events, None), month);
+        let output = render_month(&colored(events, None), month, false, false);
         assert!(output.contains("January"));
         assert!(output.contains("2024"));
+    }
+
+    #[test]
+    fn test_render_month_agenda_and_details() {
+        let month = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let start = Local.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).single().unwrap();
+        let end = start + chrono::Duration::hours(1);
+        let mut event = local_event("Sprint Review", start, end);
+        event.description = Some("Demo features".to_string());
+        event.location = Some("Auditorium".to_string());
+        let events = vec![event];
+
+        // Grid-only month view shows no summaries at all.
+        let grid = render_month(&colored(events.clone(), None), month, false, false);
+        assert!(!grid.contains("Sprint Review"));
+
+        // Agenda mode appends one compact time + summary line per event.
+        let agenda = render_month(&colored(events.clone(), None), month, true, false);
+        assert!(agenda.contains("Sprint Review"));
+        assert!(agenda.contains("at Auditorium"));
+        assert!(!agenda.contains("Demo features"));
+
+        // Details mode expands every event with its full fields.
+        let details = render_month(&colored(events, None), month, false, true);
+        assert!(details.contains("Sprint Review"));
+        assert!(details.contains("  Location:     Auditorium"));
+        assert!(details.contains("Demo features"));
     }
 
     #[test]
@@ -1219,18 +1313,18 @@ mod tests {
         let end = start + chrono::Duration::hours(1);
         let events = vec![local_event("Meeting", start, end)];
 
-        let grid = render_week(&colored(events.clone(), Some("#ff8800")), monday, false);
+        let grid = render_week(&colored(events.clone(), Some("#ff8800")), monday, false, false);
         assert!(grid.contains("\x1b[38;2;255;136;0m"));
         // Grid alignment is preserved despite the escape sequences.
         for line in grid.lines().filter(|l| l.contains("10:00 Meeting")) {
             assert_eq!(visible_width(line.trim_end()), line.trim_end().chars().count());
         }
 
-        let agenda = render_week(&colored(events.clone(), Some("#ff8800")), monday, true);
+        let agenda = render_week(&colored(events.clone(), Some("#ff8800")), monday, true, false);
         assert!(agenda.contains("\x1b[38;2;255;136;0mMeeting\x1b[0m"));
 
-        assert!(!render_week(&colored(events.clone(), None), monday, false).contains('\x1b'));
-        assert!(!render_week(&colored(events, None), monday, true).contains('\x1b'));
+        assert!(!render_week(&colored(events.clone(), None), monday, false, false).contains('\x1b'));
+        assert!(!render_week(&colored(events, None), monday, true, false).contains('\x1b'));
     }
 
     #[test]
@@ -1240,8 +1334,8 @@ mod tests {
         let end = start + chrono::Duration::hours(1);
         let events = vec![local_event("Meeting", start, end)];
 
-        let output = render_month(&colored(events.clone(), Some("#ff8800")), month);
+        let output = render_month(&colored(events.clone(), Some("#ff8800")), month, false, false);
         assert!(output.contains("\x1b[38;2;255;136;0m●\x1b[0m"));
-        assert!(!render_month(&colored(events, None), month).contains('\x1b'));
+        assert!(!render_month(&colored(events, None), month, false, false).contains('\x1b'));
     }
 }

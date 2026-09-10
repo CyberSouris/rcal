@@ -47,9 +47,13 @@ enum Commands {
         #[arg(long)]
         next: bool,
 
-        /// Show the full day-by-day listing below the grid
-        #[arg(long, visible_alias = "details")]
+        /// Show a compact day-by-day listing below the grid
+        #[arg(long)]
         agenda: bool,
+
+        /// Show all details of each event below the grid
+        #[arg(long)]
+        details: bool,
     },
 
     /// Show this month's overview
@@ -61,6 +65,14 @@ enum Commands {
         /// Show the next month
         #[arg(long)]
         next: bool,
+
+        /// Show a compact day-by-day listing below the grid
+        #[arg(long)]
+        agenda: bool,
+
+        /// Show all details of each event below the grid
+        #[arg(long)]
+        details: bool,
     },
 
     /// Show events for a specific date (or a single event's details at a time)
@@ -197,8 +209,12 @@ async fn main() -> anyhow::Result<()> {
             let date = if next { date + Days::new(1) } else { date };
             show_day(date, None, details)
         }
-        Some(Commands::Week { date, next, agenda }) => show_week(date, next, agenda),
-        Some(Commands::Month { month, next }) => show_month(month, next),
+        Some(Commands::Week { date, next, agenda, details }) => {
+            show_week(date, next, agenda, details)
+        }
+        Some(Commands::Month { month, next, agenda, details }) => {
+            show_month(month, next, agenda, details)
+        }
         Some(Commands::Show { date, details }) => {
             let (date, time) = parse_show_arg(&date)?;
             show_day(date, time, details)
@@ -476,9 +492,10 @@ fn find_event_at_time<'a>(
 }
 
 /// Show the week view starting on (or containing) `date`. When `next` is
-/// set, the week after `date` is shown. When `agenda` is set, the full
-/// day-by-day listing is appended below the event grid.
-fn show_week(date: Option<String>, next: bool, agenda: bool) -> anyhow::Result<()> {
+/// set, the week after `date` is shown. When `agenda` is set, a compact
+/// day-by-day listing is appended below the event grid; when `details` is
+/// set instead, each event is expanded with all of its fields.
+fn show_week(date: Option<String>, next: bool, agenda: bool, details: bool) -> anyhow::Result<()> {
     let db = db::Database::open()?;
     let start = match date {
         Some(d) => parse_date(&d)?,
@@ -487,13 +504,20 @@ fn show_week(date: Option<String>, next: bool, agenda: bool) -> anyhow::Result<(
     let start = if next { start + Days::new(7) } else { start };
     let all = db.get_all_stored_events(None, None)?;
     let colored = colored_events(&all, &calendar_color_map(&db), accent_color().as_deref());
-    print!("{}", display::render_week(&colored, start, agenda));
+    print!("{}", display::render_week(&colored, start, agenda, details));
     Ok(())
 }
 
 /// Show the month view for `month`. When `next` is set, the month after
-/// `month` is shown.
-fn show_month(month: Option<String>, next: bool) -> anyhow::Result<()> {
+/// `month` is shown. When `agenda` is set, a compact day-by-day listing is
+/// appended below the calendar grid; when `details` is set instead, each
+/// event is expanded with all of its fields.
+fn show_month(
+    month: Option<String>,
+    next: bool,
+    agenda: bool,
+    details: bool,
+) -> anyhow::Result<()> {
     let db = db::Database::open()?;
     let month_date = match month {
         Some(m) => parse_month(&m)?,
@@ -506,7 +530,7 @@ fn show_month(month: Option<String>, next: bool) -> anyhow::Result<()> {
     };
     let all = db.get_all_stored_events(None, None)?;
     let colored = colored_events(&all, &calendar_color_map(&db), accent_color().as_deref());
-    print!("{}", display::render_month(&colored, month_date));
+    print!("{}", display::render_month(&colored, month_date, agenda, details));
     Ok(())
 }
 
@@ -519,8 +543,8 @@ fn run_default_view() -> anyhow::Result<()> {
 
     match default_view.as_str() {
         "today" => show_day(Local::now().date_naive(), None, false),
-        "week" => show_week(None, false, false),
-        "month" => show_month(None, false),
+        "week" => show_week(None, false, false, false),
+        "month" => show_month(None, false, false, false),
         other => anyhow::bail!(
             "Invalid default_view '{}' in config; expected one of: today, week, month.",
             other

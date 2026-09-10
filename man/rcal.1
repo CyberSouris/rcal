@@ -40,8 +40,10 @@ Show an overview of the week containing the given date, or the current week.
 Start date (\fIYYYY\-MM\-DD\fR); defaults to Monday of the current week.
 .IP "\fB\-\-next\fR"
 Show the next week.
-.IP "\fB\-\-agenda\fR (synonym: \fB\-\-details\fR)"
-Append a full day-by-day listing below the event grid.
+.IP "\fB\-\-agenda\fR"
+Append a compact day-by-day listing (one time and summary line per event).
+.IP "\fB\-\-details\fR"
+Append a day-by-day listing with every event expanded to all its details.
 .RE
 .TP
 .B month
@@ -52,6 +54,10 @@ Show an overview of the given month, or the current month.
 Month (\fIYYYY\-MM\fR); defaults to the current month.
 .IP "\fB\-\-next\fR"
 Show the next month.
+.IP "\fB\-\-agenda\fR"
+Append a compact day-by-day listing (one time and summary line per event).
+.IP "\fB\-\-details\fR"
+Append a day-by-day listing with every event expanded to all its details.
 .RE
 .TP
 .B show
