@@ -17,8 +17,11 @@ _rcal() {
     local i
     for ((i = 1; i < cword; i++)); do
         case "${words[i]}" in
-            today|week|month|show|import|sync|new|search|calendars|init)
+            today|day|week|month|show|import|sync|new|search|calendars|init)
                 subcmd="${words[i]}"
+                if [[ "${words[i]}" == "day" ]]; then
+                    subcmd="today"
+                fi
                 break
                 ;;
             -*)
@@ -31,6 +34,14 @@ _rcal() {
     if [[ "$cur" == -* ]] || [[ ${prev} == -* ]]; then
         # Completing a flag value for known options
         case "$subcmd" in
+            today)
+                case "$prev" in
+                    -d|--date)
+                        _rcal_date_completion
+                        return
+                        ;;
+                esac
+                ;;
             week)
                 case "$prev" in
                     -d|--date)
@@ -121,7 +132,7 @@ _rcal() {
     esac
 
     # No subcommand yet — complete subcommands and global flags
-    local subcommands="today week month show import sync new search calendars init"
+    local subcommands="today day week month show import sync new search calendars init"
     local global_flags="--version --help -h -V"
     COMPREPLY=($(compgen -W "$subcommands $global_flags" -- "$cur"))
 }
@@ -132,7 +143,7 @@ _rcal_flag_completion() {
     local flags=""
 
     case "$subcmd" in
-        today)      flags="--details --help -h" ;;
+        today)      flags="--details --date --next --help -d -h" ;;
         week)       flags="--date --next --agenda --details --help -d -h" ;;
         month)      flags="--month --next --agenda --details --help -m -h" ;;
         show)       flags="--details --help -h" ;;

@@ -27,6 +27,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Show today's events
+    #[command(visible_alias = "day")]
     Today {
         /// Show all details of each event
         #[arg(long)]
@@ -35,6 +36,10 @@ enum Commands {
         /// Advance one day per occurrence (repeatable)
         #[arg(long, action = clap::ArgAction::Count)]
         next: u8,
+
+        /// Date to show (YYYY-MM-DD), defaults to today
+        #[arg(short, long)]
+        date: Option<String>,
     },
 
     /// Show this week's overview
@@ -204,8 +209,12 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Today { details, next }) => {
-            let date = Local::now().date_naive() + Days::new(next as u64);
+        Some(Commands::Today { details, next, date }) => {
+            let base = match date {
+                Some(d) => parse_date(&d)?,
+                None => Local::now().date_naive(),
+            };
+            let date = base + Days::new(next as u64);
             show_day(date, None, details)
         }
         Some(Commands::Week { date, next, agenda, details }) => {

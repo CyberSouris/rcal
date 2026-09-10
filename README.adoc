@@ -137,7 +137,7 @@ owns their calendar the next time you run `rcal sync`.
 
 == Usage reference
 
-`rcal today`:: Show today's events
+`rcal today [--date DATE]` / `rcal day [--date DATE]`:: Show today's (or the given day's) events
 `rcal add-account [-u URL] [--username USER] [--password-command CMD] [-f]`:: Add a CalDAV account (appends to the config)
 `rcal subscribe URL [--name NAME]`:: Subscribe to an online ICS feed
 `rcal week [-d DATE] [--agenda|--details]`:: Week overview (`YYYY-MM-DD`)

@@ -30,7 +30,19 @@ Print version information.
 .SH COMMANDS
 .TP
 .B today
-Show today's events.
+Show today's events. The alias
+.B day
+is accepted.
+.TP
+.RS
+.IP "\fB\-d, \-\-date\fR \fIDATE\fR"
+Date to show (\fIYYYY\-MM\-DD\fR); defaults to today.
+.IP "\fB\-\-details\fR"
+Show all details of each event.
+.IP "\fB\-\-next\fR"
+Advance one day per occurrence; repeatable (so \fB\-\-next \-\-next\fR shows
+the day after tomorrow).
+.RE
 .TP
 .B week
 Show an overview of the week containing the given date, or the current week.
