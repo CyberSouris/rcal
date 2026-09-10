@@ -1235,7 +1235,11 @@ async fn handle_delete(
                 let server = config
                     .servers
                     .iter()
-                    .find(|s| cal_id.starts_with(&s.url))
+                    // Prefer the account whose configured URL is the longest
+                    // prefix match, so an account rooted at /work/ wins over
+                    // one rooted at / when both match a calendar href.
+                    .filter(|s| cal_id.starts_with(&s.url))
+                    .max_by_key(|s| s.url.len())
                     .ok_or_else(|| {
                         anyhow::anyhow!(
                             "No configured CalDAV server owns calendar '{}'.",
