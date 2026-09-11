@@ -199,22 +199,23 @@ pub fn render_event_details(event: &CalendarEvent, color: Option<&str>) -> Strin
         }
     }
 
-    output.push_str(&format!("  UID:          {}\n", sanitize(&event.uid)));
-
     if let Some(recurrence) = event.recurrence.as_deref() {
         if !recurrence.is_empty() {
             output.push_str(&format!("  Recurrence:   {}\n", sanitize(recurrence)));
         }
     }
 
-    if let Some(description) = event.description.as_deref() {
-        if !description.is_empty() {
-            let indented: String = sanitize_multiline(description)
-                .lines()
-                .map(|l| if l.is_empty() { "\n".to_string() } else { format!("      {}\n", l) })
-                .collect();
-            output.push_str(&format!("\n  Description:\n{}", indented));
-        }
+    // The description is always shown so details never collapses to just the
+    // time when the optional fields are absent.
+    let description = event.description.as_deref().unwrap_or("").trim();
+    if description.is_empty() {
+        output.push_str(&format!("  Description:     {}\n", "(none)"));
+    } else {
+        let indented: String = sanitize_multiline(description)
+            .lines()
+            .map(|l| if l.is_empty() { "\n".to_string() } else { format!("      {}\n", l) })
+            .collect();
+        output.push_str(&format!("\n  Description:\n{}", indented));
     }
 
     output
@@ -1201,7 +1202,7 @@ mod tests {
         assert!(!output.contains("AgendaRound two"));
         assert!(output.contains("  Location:     Room 1"));
         assert!(output.contains("  Link:         https://example.com"));
-        assert!(output.contains("  UID:          uid-Meeting"));
+        assert!(!output.contains("uid-Meeting"));
     }
 
     #[test]
@@ -1226,11 +1227,12 @@ mod tests {
         let output = render_event_details(&event, None);
         assert!(output.contains("Standup"));
         assert!(output.contains("  Time:"));
-        // Absent optional fields are simply skipped.
+        // Absent optional fields are skipped, but the description is always
+        // shown (with a placeholder) and the UID is not.
         assert!(!output.contains("  Location:"));
         assert!(!output.contains("  Link:"));
-        assert!(!output.contains("Description:"));
-        assert!(output.contains("  UID:          uid-Standup"));
+        assert!(output.contains("  Description:     (none)"));
+        assert!(!output.contains("uid-Standup"));
         assert_eq!(output.lines().count(), 4);
     }
 
