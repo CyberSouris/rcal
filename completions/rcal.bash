@@ -17,7 +17,7 @@ _rcal() {
     local i
     for ((i = 1; i < cword; i++)); do
         case "${words[i]}" in
-            today|day|week|month|show|import|sync|new|search|calendars|init)
+            today|day|week|month|show|import|sync|new|search|calendars|init|delete|subscribe|add-account)
                 subcmd="${words[i]}"
                 if [[ "${words[i]}" == "day" ]]; then
                     subcmd="today"
@@ -132,7 +132,7 @@ _rcal() {
     esac
 
     # No subcommand yet — complete subcommands and global flags
-    local subcommands="today day week month show import sync new search calendars init"
+    local subcommands="today day week month show import sync new search calendars init delete subscribe add-account"
     local global_flags="--version --help -h -V"
     COMPREPLY=($(compgen -W "$subcommands $global_flags" -- "$cur"))
 }
@@ -153,6 +153,9 @@ _rcal_flag_completion() {
         search)     flags="--from --to --help -f -t -h" ;;
         calendars)  flags="--help -h" ;;
         init)       flags="--url --username --password_command --force --help -u -f -h" ;;
+        add-account) flags="--url --username --password-command --force --help -u -f -h" ;;
+        subscribe)  flags="--name --help -h" ;;
+        delete)     flags="--calendar --force --help -c -f -h" ;;
     esac
 
     COMPREPLY=($(compgen -W "$flags" -- "$cur"))
