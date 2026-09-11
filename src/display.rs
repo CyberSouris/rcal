@@ -193,10 +193,11 @@ pub fn render_event_details(event: &CalendarEvent, color: Option<&str>) -> Strin
             output.push_str(&format!("  Location:     {}\n", sanitize(location)));
         }
     }
-    if let Some(url) = event.url.as_deref() {
-        if !url.is_empty() {
-            output.push_str(&format!("  Link:         {}\n", sanitize(url)));
-        }
+    let url = event.url.as_deref().unwrap_or("");
+    if url.is_empty() {
+        output.push_str(&format!("  Link:         {}\n", "(none)"));
+    } else {
+        output.push_str(&format!("  Link:         {}\n", sanitize(url)));
     }
 
     if let Some(recurrence) = event.recurrence.as_deref() {
@@ -1227,13 +1228,13 @@ mod tests {
         let output = render_event_details(&event, None);
         assert!(output.contains("Standup"));
         assert!(output.contains("  Time:"));
-        // Absent optional fields are skipped, but the description is always
-        // shown (with a placeholder) and the UID is not.
+        // Absent optional fields are skipped, but the link and description
+        // are always shown (with a placeholder) and the UID is not.
         assert!(!output.contains("  Location:"));
-        assert!(!output.contains("  Link:"));
+        assert!(output.contains("  Link:         (none)"));
         assert!(output.contains("  Description:     (none)"));
         assert!(!output.contains("uid-Standup"));
-        assert_eq!(output.lines().count(), 4);
+        assert_eq!(output.lines().count(), 5);
     }
 
     #[test]
