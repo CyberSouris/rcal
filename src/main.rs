@@ -1323,7 +1323,7 @@ fn parse_time(s: &str) -> anyhow::Result<chrono::NaiveTime> {
 
 /// Interpret a naive datetime that the user typed (i.e. a local wall-clock
 /// time) as a UTC instant. Naive fallback handles DST transitions.
-fn naive_local_to_utc(naive: chrono::NaiveDateTime) -> chrono::DateTime<chrono::Utc> {
+pub(crate) fn naive_local_to_utc(naive: chrono::NaiveDateTime) -> chrono::DateTime<chrono::Utc> {
     use chrono::{Local, LocalResult, TimeZone};
     match Local.from_local_datetime(&naive) {
         LocalResult::Single(dt) => dt.with_timezone(&chrono::Utc),

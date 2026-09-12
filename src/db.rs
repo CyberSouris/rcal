@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, Datelike, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 use std::path::Path;
 
@@ -652,11 +652,10 @@ impl Database {
     /// sync metadata, so a caller can tell a local event from one synced to a
     /// CalDAV server or an ICS subscription.
     pub fn get_stored_events_for_day(&self, date: chrono::NaiveDate) -> Result<Vec<StoredEvent>> {
-        let start = chrono::Local
-            .with_ymd_and_hms(date.year(), date.month(), date.day(), 0, 0, 0)
-            .single()
-            .unwrap()
-            .with_timezone(&Utc);
+        // Local midnight on this date; DST folds/gaps at 00:00 are resolved
+        // without panicking (see the helper's handling of LocalResult).
+        let midnight = date.and_hms_opt(0, 0, 0).unwrap();
+        let start = crate::naive_local_to_utc(midnight);
         let end = start + chrono::Duration::days(1);
 
         let start_str = start.to_rfc3339();
@@ -694,6 +693,7 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use crate::ical::CalendarEvent;
 
     /// Open an in-memory database for testing
