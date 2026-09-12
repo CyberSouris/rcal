@@ -254,8 +254,13 @@ impl Database {
         Ok(())
     }
 
-    /// Whether `table` currently has a `column`.
+    /// Whether `table` currently has a `column`. Table and column names are
+    /// SQL identifiers and cannot be bound as parameters; they are validated
+    /// against a strict allowlist before being interpolated.
     fn column_exists(&self, table: &str, column: &str) -> Result<bool> {
+        if !is_safe_identifier(table) {
+            anyhow::bail!("Unsafe table name in query: {:?}", table);
+        }
         let mut stmt =
             self.conn
                 .prepare(&format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"))?;
@@ -266,6 +271,9 @@ impl Database {
     /// Add a column to the events table if it is missing (handles databases
     /// created by older versions of rcal).
     fn ensure_event_column(&self, column: &str) -> Result<()> {
+        if !is_safe_identifier(column) {
+            anyhow::bail!("Unsafe column name in statement: {:?}", column);
+        }
         if !self.column_exists("events", column)? {
             self.conn.execute(
                 &format!("ALTER TABLE events ADD COLUMN {} TEXT", column),
@@ -585,6 +593,21 @@ impl Database {
         )?;
         Ok(())
     }
+}
+
+/// Whether a string is a safe SQL identifier (ASCII letters, digits, and
+/// underscore; not starting with a digit). Used before interpolating table or
+/// column names into statements, since SQLite cannot bind identifiers as
+/// parameters.
+fn is_safe_identifier(name: &str) -> bool {
+    let first = match name.as_bytes().first() {
+        Some(b) => b,
+        None => return false,
+    };
+    first.is_ascii_alphabetic()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 /// Map the event portion of a database row (columns 0-9) to a CalendarEvent
