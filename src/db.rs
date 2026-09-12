@@ -36,6 +36,22 @@ impl Database {
     /// Open database from a specific path
     pub fn open_from(path: &Path) -> Result<Self> {
         let existed = path.exists();
+        let is_memory = path.as_os_str() == ":memory:";
+
+        #[cfg(unix)]
+        if !is_memory {
+            // Never follow a symlink planted at the DB path (an attacker with
+            // write access to a shared directory could otherwise redirect the
+            // database to an arbitrary file).
+            Self::refuse_symlink(path)?;
+            // Pre-create the file at 0600 before SQLite opens it, so the
+            // database is never briefly visible to other local users through
+            // the process umask during `Connection::open`.
+            if !existed {
+                Self::create_private_database_file(path)?;
+            }
+        }
+
         let conn = Connection::open(path)
             .with_context(|| format!("Failed to open database: {}", path.display()))?;
 
@@ -47,6 +63,36 @@ impl Database {
         db.init_schema()?;
 
         Ok(db)
+    }
+
+    /// Refuse to open a database path that is a symlink.
+    #[cfg(unix)]
+    fn refuse_symlink(path: &Path) -> Result<()> {
+        if let Ok(meta) = std::fs::symlink_metadata(path) {
+            if meta.file_type().is_symlink() {
+                anyhow::bail!(
+                    "Refusing to open database path {}: it is a symlink.",
+                    path.display()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Pre-create the database file with owner-only permissions. `create_new`
+    /// (O_EXCL) fails instead of racing with an attacker-planted file, and
+    /// `O_NOFOLLOW` refuses any symlink that appears at the path.
+    #[cfg(unix)]
+    fn create_private_database_file(path: &Path) -> Result<()> {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .with_context(|| format!("Failed to create database file: {}", path.display()))?;
+        Ok(())
     }
 
     /// Ensure a file-backed database is only accessible to the owner. The
