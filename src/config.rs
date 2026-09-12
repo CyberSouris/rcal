@@ -218,7 +218,10 @@ impl Config {
     }
 
     /// Serialize to TOML and write to the given path, creating parent
-    /// directories as needed
+    /// directories as needed. The file is created owner-only (0600) and is
+    /// refused when the target path is a symlink, so a config holding a
+    /// `password_command` is never left world-readable and can never be
+    /// redirected to an arbitrary file.
     pub fn write_to(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| {
@@ -230,23 +233,40 @@ impl Config {
         }
         let content =
             toml::to_string(self).context("Failed to serialize config file")?;
-        fs::write(path, content)
+        Self::write_private(path, &content)
             .with_context(|| format!("Failed to write config file: {}", path.display()))?;
-        Self::restrict_permissions(path);
         Ok(())
     }
 
-    /// Restrict the config file to owner-only access on Unix. This is applied
-    /// on write only; if the user later changes the permissions, rcal leaves
-    /// them alone.
+    /// The file is created with mode 0600 from the start (never derived from
+    /// the process umask) and opened with `O_NOFOLLOW` so a pre-existing
+    /// symlink at `path` is refused instead of followed. Any pre-existing
+    /// permissive file is tightened back to 0600 through the already-open
+    /// descriptor, and a failure to secure it aborts the write.
     #[cfg(unix)]
-    fn restrict_permissions(path: &Path) {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    fn write_private(path: &Path, content: &str) -> Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .with_context(|| format!("Failed to open config file: {}", path.display()))?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .context("Failed to restrict config file permissions to owner-only")?;
+        file.write_all(content.as_bytes())
+            .context("Failed to write config file contents")?;
+        Ok(())
     }
 
     #[cfg(not(unix))]
-    fn restrict_permissions(_path: &Path) {}
+    fn write_private(path: &Path, content: &str) -> Result<()> {
+        fs::write(path, content)
+    }
 
     /// Load configuration from default location
     pub fn load() -> Result<Self> {
