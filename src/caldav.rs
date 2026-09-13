@@ -561,15 +561,40 @@ async fn sync_calendar(
 }
 
 /// Build a safe resource name for an event UID.
+///
+/// Unsafe characters (anything outside `[A-Za-z0-9._-]`) are replaced with
+/// `_`, so a bare sanitized UID could collide: `a b` and `a/b` would both map
+/// to `a_b`. When sanitization is required, a stable FNV-1a hash of the raw
+/// UID is appended to keep every distinct UID on its own resource. UIDs that
+/// need no sanitization keep their existing names for compatibility.
 fn href_for_uid(uid: &str) -> String {
-    let sanitized: String = uid
-        .chars()
-        .map(|c| match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' => c,
-            _ => '_',
-        })
-        .collect();
+    let mut changed = false;
+    let mut sanitized = String::with_capacity(uid.len());
+    for c in uid.chars() {
+        match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' => sanitized.push(c),
+            _ => {
+                sanitized.push('_');
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        sanitized.push_str(&format!("-{:016x}", fnv1a(uid.as_bytes())));
+    }
     format!("{}.ics", sanitized)
+}
+
+/// FNV-1a 64-bit hash (offset basis 0xcbf29ce484222325, prime
+/// 0x100000001b3). Chosen for stability across architectures and platforms;
+/// the value is persisted in CalDAV resource names.
+fn fnv1a(data: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &byte in data {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 /// Percent-encode a path segment for use in a URL.
@@ -1027,7 +1052,12 @@ END:VCALENDAR</c:calendar-data>
     #[test]
     fn test_href_for_uid_and_urlencode() {
         assert_eq!(href_for_uid("local-1"), "local-1.ics");
-        assert_eq!(href_for_uid("a b@c"), "a_b_c.ics");
+        // Safe UIDs keep their name; unsafe ones get a stable hash suffix so
+        // distinct UIDs that sanitize identically (e.g. "a b" and "a/b")
+        // never land on the same resource.
+        assert_eq!(href_for_uid("a b@c"), "a_b_c-6a3c4808860a178f.ics");
+        assert_eq!(href_for_uid("a b"), "a_b-e63f991904833892.ics");
+        assert_eq!(href_for_uid("a/b"), "a_b-e620c3190468cf61.ics");
         assert_eq!(urlencode_path_segment("a b/&"), "a%20b%2F%26");
     }
 
