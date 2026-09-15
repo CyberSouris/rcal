@@ -1,0 +1,204 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      changelog:
+        description: >
+          Changelog text for the tag message and release notes. Leave empty to
+          auto-generate from commits between the previous tag and the released
+          commit. The version is always derived from the semantic git log.
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Prepare release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      changelog: ${{ steps.gen.outputs.log }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Derive version from semantic git log
+        id: version
+        run: |
+          set -euo pipefail
+          PREV="$(git tag --sort=-v:refname | head -n1 || true)"
+          if [ -n "$PREV" ]; then
+            BASE="${PREV#v}"
+            RANGE="$PREV..HEAD"
+            if [ -z "$(git log --oneline "$RANGE")" ]; then
+              echo "No commits since $PREV; nothing to release." >&2
+              exit 1
+            fi
+          else
+            BASE="0.0.0"
+            RANGE="HEAD"
+          fi
+
+          PART="patch"
+          if git log --format='%s%n%b' "$RANGE" | grep -Eq 'BREAKING CHANGE:|^[^ :]+!(:|\s)'; then
+            PART="major"
+          elif git log --format='%s' "$RANGE" | grep -Eq '^feat(\([^)]*\))?!?:'; then
+            PART="minor"
+          fi
+
+          major="$(printf '%s' "$BASE" | cut -d. -f1)"
+          minor="$(printf '%s' "$BASE" | cut -d. -f2)"
+          patch="$(printf '%s' "$BASE" | cut -d. -f3)"
+          case "$PART" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+          esac
+          VERSION="$major.$minor.$patch"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Derived rcal $VERSION from commits since '${PREV:-<none>}'."
+
+      - name: Check tag is free
+        env:
+          TAG: v${{ steps.version.outputs.version }}
+        run: |
+          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
+            echo "Ref refs/tags/$TAG already exists on origin." >&2
+            exit 1
+          fi
+
+      - name: Generate changelog
+        id: gen
+        env:
+          CHANGELOG: ${{ inputs.changelog }}
+          RANGE: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          PREV="$(git tag --sort=-v:refname | head -n1 || true)"
+          if [ -n "$CHANGELOG" ]; then
+            LOG="$CHANGELOG"
+          elif [ -n "$PREV" ]; then
+            LOG="$(git log --oneline --no-decorate "$PREV..HEAD")"
+          else
+            LOG="$(git log --oneline --no-decorate HEAD)"
+          fi
+          {
+            echo "log<<RCAL_EOF"
+            echo "$LOG"
+            echo "RCAL_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+  source-tarball:
+    name: Source tarball
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Create source tarball (git archive, no .git)
+        env:
+          CHANGELOG: ${{ needs.prepare.outputs.changelog }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          mkdir -p "dist/rcal-$VERSION"
+          git archive HEAD | tar -x -C "dist/rcal-$VERSION"
+          printf '%s\n' "$CHANGELOG" > "dist/rcal-$VERSION/CHANGELOG"
+          tar -C dist -czf "rcal-$VERSION.tar.gz" "rcal-$VERSION"
+
+      - name: Upload source tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: rcal-${{ needs.prepare.outputs.version }}-source
+          path: rcal-${{ needs.prepare.outputs.version }}.tar.gz
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    env:
+      TARBALL: rcal-${{ needs.prepare.outputs.version }}-${{ matrix.target }}.tar.gz
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Package binary tarball (binary + man page + changelog)
+        env:
+          CHANGELOG: ${{ needs.prepare.outputs.changelog }}
+        run: |
+          mkdir -p dist/man
+          cp target/release/rcal dist/rcal
+          cp man/rcal.1 dist/man/rcal.1
+          printf '%s\n' "$CHANGELOG" > dist/CHANGELOG
+          tar -C dist -czf "$TARBALL" rcal man CHANGELOG
+
+      - name: Upload binary tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: rcal-${{ needs.prepare.outputs.version }}-${{ matrix.target }}
+          path: ${{ env.TARBALL }}
+
+  publish:
+    name: Publish release
+    needs: [prepare, source-tarball, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Download tarballs
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create annotated tag with changelog
+        env:
+          CHANGELOG: ${{ needs.prepare.outputs.changelog }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TAG: v${{ needs.prepare.outputs.version }}
+        run: git tag -a "$TAG" -m "rcal $VERSION" -m "$CHANGELOG"
+
+      - name: Push tag
+        env:
+          TAG: v${{ needs.prepare.outputs.version }}
+        run: git push origin "$TAG"
+
+      - name: Publish GitHub release with tarballs
+        env:
+          CHANGELOG: ${{ needs.prepare.outputs.changelog }}
+          TAG: v${{ needs.prepare.outputs.version }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" \
+            --title "rcal $VERSION" \
+            --notes "$CHANGELOG" \
+            release-assets/*
