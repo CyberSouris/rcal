@@ -1253,4 +1253,42 @@ END:VCALENDAR</c:calendar-data>
         let err = client.delete_event(&work, "evt-1.ics", None).await.unwrap_err();
         assert!(err.to_string().contains("status 500"), "unexpected error: {}", err);
     }
+
+    // --- resolve_password --------------------------------------------------
+
+    fn pw_server(command: Option<&str>) -> ServerConfig {
+        ServerConfig {
+            url: "https://example.com/dav/".to_string(),
+            username: "alice".to_string(),
+            password_command: command.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn test_resolve_password_uses_command() {
+        let server = pw_server(Some("printf secret"));
+        assert_eq!(resolve_password(&server).unwrap(), "secret");
+    }
+
+    #[test]
+    fn test_resolve_password_trims_command_output() {
+        let server = pw_server(Some("printf '  secret\n'"));
+        assert_eq!(resolve_password(&server).unwrap(), "secret");
+    }
+
+    #[test]
+    fn test_resolve_password_error_on_nonzero_exit() {
+        let server = pw_server(Some("exit 3"));
+        let err = resolve_password(&server).unwrap_err();
+        assert!(err.to_string().contains("exited with status"), "{}", err);
+    }
+
+    #[test]
+    fn test_resolve_password_invalid_utf8() {
+        // Octal escapes are portable across shells (dash interprets \377 as
+        // a single 0xFF byte, which is not valid UTF-8).
+        let server = pw_server(Some("printf '\\377'"));
+        let err = resolve_password(&server).unwrap_err();
+        assert!(err.to_string().contains("not valid UTF-8"), "{}", err);
+    }
 }
