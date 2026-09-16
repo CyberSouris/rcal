@@ -10,7 +10,7 @@ image:https://github.com/CyberSouris/rcal/actions/workflows/ci.yml/badge.svg[Bui
 image:https://img.shields.io/github/v/release/CyberSouris/rcal[Latest release, link=https://github.com/CyberSouris/rcal/releases]
 image:https://img.shields.io/badge/license-GPL--3.0-blue[License: GPL-3.0, link=https://github.com/CyberSouris/rcal]
 image:https://deps.rs/repo/github/CyberSouris/rcal/status.svg[Dependencies, link=https://deps.rs/repo/github/CyberSouris/rcal]
-image:https://img.shields.io/badge/rust-1.85%2B-blue[Rust 1.85+, link=https://rustup.rs]
+image:https://img.shields.io/badge/rust-1.88%2B-blue[Rust 1.88+, link=https://rustup.rs]
 
 == Features
 
@@ -28,7 +28,7 @@ image:https://img.shields.io/badge/rust-1.85%2B-blue[Rust 1.85+, link=https://ru
 
 === Prerequisites
 
-* Rust 1.85 or newer (edition 2024) — https://rustup.rs
+* Rust 1.88 or newer (edition 2024) — https://rustup.rs
 * No other runtime dependencies; the SQLite driver is bundled
 
 === Building from source
