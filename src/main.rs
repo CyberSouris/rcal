@@ -1553,4 +1553,250 @@ mod tests {
         assert!(err.to_string().contains("Work"));
         assert!(err.to_string().contains("http://x/work/"));
     }
+
+    // --- parse_time -------------------------------------------------------
+
+    #[test]
+    fn test_parse_time_valid() {
+        let t = parse_time("09:30").unwrap();
+        assert_eq!(t, chrono::NaiveTime::from_hms_opt(9, 30, 0).unwrap());
+    }
+
+    #[test]
+    fn test_parse_time_accepts_unpadded_hour() {
+        assert_eq!(parse_time("9:05").unwrap(), chrono::NaiveTime::from_hms_opt(9, 5, 0).unwrap());
+    }
+
+    #[test]
+    fn test_parse_time_rejects_bad_hour() {
+        let err = parse_time("25:00").unwrap_err();
+        assert!(err.to_string().contains("Invalid time"));
+    }
+
+    #[test]
+    fn test_parse_time_rejects_bad_minute() {
+        let err = parse_time("09:61").unwrap_err();
+        assert!(err.to_string().contains("Invalid time"));
+    }
+
+    #[test]
+    fn test_parse_time_rejects_out_of_range() {
+        // 24:00 is a real wall clock but chrono rejects it as a time.
+        assert!(parse_time("24:00").is_err());
+        assert!(parse_time("12:99").is_err());
+    }
+
+    #[test]
+    fn test_parse_time_rejects_malformed() {
+        for bad in ["09", "09:30:15", "abc:30", "09:xx", ""] {
+            assert!(parse_time(bad).is_err(), "expected {bad:?} to fail");
+        }
+    }
+
+    // --- parse_date -------------------------------------------------------
+
+    #[test]
+    fn test_parse_date_valid() {
+        let d = parse_date("2024-02-29").unwrap();
+        assert_eq!(d, chrono::NaiveDate::from_ymd_opt(2024, 2, 29).unwrap());
+    }
+
+    #[test]
+    fn test_parse_date_rejects_invalid_values() {
+        assert!(parse_date("2024-02-30").is_err()); // Feb has 28/29 days
+        assert!(parse_date("2023-02-29").is_err()); // non-leap year
+        assert!(parse_date("2024-13-01").is_err()); // month 13
+    }
+
+    #[test]
+    fn test_parse_date_rejects_malformed() {
+        for bad in ["2024/01/15", "15-01-2024", "garbage", "", "2024/1/1"] {
+            assert!(parse_date(bad).is_err(), "expected {bad:?} to fail");
+        }
+    }
+
+    #[test]
+    fn test_parse_date_error_mentions_expected_format() {
+        let err = parse_date("not-a-date").unwrap_err();
+        assert!(err.to_string().contains("YYYY-MM-DD"));
+    }
+
+    // --- parse_month ------------------------------------------------------
+
+    #[test]
+    fn test_parse_month_valid_is_first_of_month() {
+        let d = parse_month("2024-02").unwrap();
+        assert_eq!(d, chrono::NaiveDate::from_ymd_opt(2024, 2, 1).unwrap());
+    }
+
+    #[test]
+    fn test_parse_month_accepts_unpadded_month() {
+        assert_eq!(parse_month("2024-2").unwrap(), chrono::NaiveDate::from_ymd_opt(2024, 2, 1).unwrap());
+    }
+
+    #[test]
+    fn test_parse_month_rejects_bad_month() {
+        assert!(parse_month("2024-13").is_err());
+        assert!(parse_month("2024-00").is_err());
+        assert!(parse_month("2024-0").is_err());
+    }
+
+    #[test]
+    fn test_parse_month_rejects_malformed() {
+        for bad in ["2024", "2024/02", "2024-02-15", "garbage"] {
+            assert!(parse_month(bad).is_err(), "expected {bad:?} to fail");
+        }
+    }
+
+    // --- parse_show_arg ---------------------------------------------------
+
+    #[test]
+    fn test_parse_show_arg_date_and_time() {
+        let (date, time) = parse_show_arg("2024-01-15@09:30").unwrap();
+        assert_eq!(date, chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
+        assert_eq!(time, Some(chrono::NaiveTime::from_hms_opt(9, 30, 0).unwrap()));
+    }
+
+    #[test]
+    fn test_parse_show_arg_date_only() {
+        let (date, time) = parse_show_arg("2024-01-15").unwrap();
+        assert_eq!(date, chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
+        assert_eq!(time, None);
+    }
+
+    #[test]
+    fn test_parse_show_arg_rejects_malformed() {
+        for bad in ["@09:30", "2024-01-15@", "garbage", "2024-01-15@25:00", "2024-01-15 @09:30"] {
+            assert!(parse_show_arg(bad).is_err(), "expected {bad:?} to fail");
+        }
+    }
+
+    // --- format_event_time ------------------------------------------------
+
+    fn calendar_event(
+        dtstart: Option<chrono::DateTime<chrono::Utc>>,
+        dtend: Option<chrono::DateTime<chrono::Utc>>,
+        all_day: bool,
+    ) -> ical::CalendarEvent {
+        ical::CalendarEvent {
+            uid: "u".into(),
+            summary: "s".into(),
+            description: None,
+            location: None,
+            url: None,
+            dtstart,
+            dtend,
+            all_day,
+            status: None,
+            recurrence: None,
+        }
+    }
+
+    #[test]
+    fn test_format_event_time_all_day_range() {
+        let start = chrono::DateTime::parse_from_rfc3339("2024-01-15T00:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        let end = chrono::DateTime::parse_from_rfc3339("2024-01-16T00:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        let text = format_event_time(&calendar_event(Some(start), Some(end), true));
+        assert_eq!(text, "All day (2024-01-15 to 2024-01-16)");
+    }
+
+    #[test]
+    fn test_format_event_time_all_day_single() {
+        let start = chrono::DateTime::parse_from_rfc3339("2024-05-01T00:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        let text = format_event_time(&calendar_event(Some(start), None, true));
+        assert_eq!(text, "All day (2024-05-01)");
+    }
+
+    #[test]
+    fn test_format_event_time_no_time() {
+        let no_times = format_event_time(&calendar_event(None, None, false));
+        assert_eq!(no_times, "No time");
+    }
+
+    // --- find_event_at_time -----------------------------------------------
+
+    fn timed_event(uid: &str, h: u32, m: u32) -> ical::CalendarEvent {
+        let start = chrono::Local
+            .with_ymd_and_hms(2024, 1, 15, h, m, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let end = start + chrono::Duration::hours(1);
+        calendar_event(Some(start), Some(end), false).tap_in_place(|e| e.uid = uid.into())
+    }
+
+    trait TapInPlace: Sized {
+        fn tap_in_place(mut self, f: impl FnOnce(&mut Self)) -> Self {
+            f(&mut self);
+            self
+        }
+    }
+    impl<T: Sized> TapInPlace for T {}
+
+    #[test]
+    fn test_find_event_running_at_time() {
+        let events = vec![
+            timed_event("earlier", 8, 0),
+            timed_event("current", 10, 0),
+            timed_event("later", 11, 30),
+        ];
+        let refs: Vec<&ical::CalendarEvent> = events.iter().collect();
+        let found = find_event_at_time(&refs, chrono::NaiveTime::from_hms_opt(10, 45, 0).unwrap());
+        assert_eq!(found.unwrap().uid, "current");
+        assert_ne!(found.unwrap().uid, "later");
+    }
+
+    #[test]
+    fn test_find_event_falls_back_to_earlier_later_when_nothing_running() {
+        // Both events start at 8:00 and 10:00; at 07:30 neither has started,
+        // so the fallback picks the earliest event that starts later.
+        let events = vec![
+            timed_event("early", 8, 0),
+            timed_event("mid", 10, 0),
+        ];
+        let refs: Vec<&ical::CalendarEvent> = events.iter().collect();
+        let found = find_event_at_time(&refs, chrono::NaiveTime::from_hms_opt(7, 30, 0).unwrap());
+        assert_eq!(found.unwrap().uid, "early");
+    }
+
+    #[test]
+    fn test_find_event_ignores_all_day() {
+        let all_day_start = chrono::Local
+            .with_ymd_and_hms(2024, 1, 15, 0, 0, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let events = vec![calendar_event(Some(all_day_start), None, true)];
+        let refs: Vec<&ical::CalendarEvent> = events.iter().collect();
+        // Even at "midnight" of the same day, all-day events carry no time and
+        // must never be selected.
+        let found = find_event_at_time(&refs, chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+        assert!(found.is_none());
+    }
+
+    // --- colored_events ---------------------------------------------------
+
+    #[test]
+    fn test_colored_events_uses_calendar_color_then_fallback() {
+        let ev = stored_event("u1", "X", chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(), 9, 0, Some("http://x/work/"), None);
+        let colors = HashMap::from([(String::from("http://x/work/"), Some(String::from("#ff0000")))]);
+        let colored = colored_events(std::slice::from_ref(&ev), &colors, Some("#00ff00"));
+        assert_eq!(colored[0].color.as_deref(), Some("#ff0000"));
+    }
+
+    #[test]
+    fn test_colored_events_falls_back_when_calendar_has_no_color() {
+        let ev = stored_event("u1", "X", chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(), 9, 0, Some("http://x/work/"), None);
+        let colors = HashMap::new();
+        let colored = colored_events(std::slice::from_ref(&ev), &colors, Some("#00ff00"));
+        assert_eq!(colored[0].color.as_deref(), Some("#00ff00"));
+    }
+
+    #[test]
+    fn test_colored_events_calendar_color_not_found_uses_accent() {
+        let ev = stored_event("u1", "X", chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(), 9, 0, Some("http://x/other/"), None);
+        let colors = HashMap::from([(String::from("http://x/work/"), Some(String::from("#ff0000")))]);
+        let colored = colored_events(std::slice::from_ref(&ev), &colors, Some("#00ff00"));
+        assert_eq!(colored[0].color.as_deref(), Some("#00ff00"));
+    }
 }
