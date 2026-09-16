@@ -6,6 +6,12 @@ A CLI calendar tool with CalDAV synchronization, written in Rust.
 month views in the terminal, imports iCal (`.ics`) files, and synchronizes
 bidirectionally with any CalDAV server.
 
+image:https://github.com/CyberSouris/rcal/actions/workflows/ci.yml/badge.svg[Build Status, link=https://github.com/CyberSouris/rcal/actions/workflows/ci.yml]
+image:https://img.shields.io/github/v/release/CyberSouris/rcal[Latest release, link=https://github.com/CyberSouris/rcal/releases]
+image:https://img.shields.io/badge/license-GPL--3.0-blue[License: GPL-3.0, link=https://github.com/CyberSouris/rcal]
+image:https://deps.rs/repo/github/CyberSouris/rcal/status.svg[Dependencies, link=https://deps.rs/repo/github/CyberSouris/rcal]
+image:https://img.shields.io/badge/rust-1.85%2B-blue[Rust 1.85+, link=https://rustup.rs]
+
 == Features
 
 * Day, week and month terminal views with color-coded calendars

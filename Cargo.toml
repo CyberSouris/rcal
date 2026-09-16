@@ -2,6 +2,7 @@
 name = "rcal"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "A CLI calendar tool with CalDAV synchronization"
 license = "GPL-3.0"
 
