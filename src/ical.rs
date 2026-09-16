@@ -505,8 +505,8 @@ pub fn parse_ical_datetime(value: &str) -> Result<DateTime<Utc>> {
         let naive_dt = chrono::NaiveDateTime::parse_from_str(naive_str, "%Y%m%dT%H%M%S")
             .context("Failed to parse iCal datetime")?;
         Ok(DateTime::from_naive_utc_and_offset(naive_dt, Utc))
-    } else if value.len() == 16 {
-        // DateTime with timezone offset: YYYYMMDDTHHMMSS+HHMM
+    } else if value.len() == 20 {
+        // DateTime with timezone offset: YYYYMMDDTHHMMSS+HHMM (±HHMM, 5 chars)
         let naive_dt = DateTime::parse_from_str(value, "%Y%m%dT%H%M%S%z")
             .context("Failed to parse iCal datetime with timezone")?;
         Ok(naive_dt.with_timezone(&Utc))
@@ -668,6 +668,26 @@ mod tests {
     fn test_parse_ical_datetime_utc() {
         let result = parse_ical_datetime("20240115T093000Z");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_ical_datetime_negative_offset() {
+        let dt = parse_ical_datetime("20240115T093000-0500").unwrap();
+        assert_eq!(dt.to_rfc3339(), "2024-01-15T14:30:00+00:00");
+    }
+
+    #[test]
+    fn test_parse_ical_datetime_positive_offset() {
+        let dt = parse_ical_datetime("20240115T093000+0530").unwrap();
+        assert_eq!(dt.to_rfc3339(), "2024-01-15T04:00:00+00:00");
+    }
+
+    #[test]
+    fn test_parse_ical_datetime_floating_with_offset_is_not_utc() {
+        // 14-char floating times have no Z/offset; 16-char +HHMM must be
+        // shifted relative to UTC even though it is not Z-suffixed.
+        let floating = parse_ical_datetime("20240115T093000-0800").unwrap();
+        assert_eq!(floating.to_rfc3339(), "2024-01-15T17:30:00+00:00");
     }
 
     #[test]
