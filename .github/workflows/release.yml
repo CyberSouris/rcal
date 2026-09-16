@@ -151,6 +151,8 @@ jobs:
           mkdir -p dist/man
           cp target/release/rcal dist/rcal
           cp man/rcal.1 dist/man/rcal.1
+          mkdir -p dist/completions
+          cp completions/rcal.bash dist/completions/rcal-completion.bash
           printf '%s\n' "$CHANGELOG" > dist/CHANGELOG
           tar -C dist -czf "$TARBALL" rcal man CHANGELOG
 
