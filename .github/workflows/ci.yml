@@ -24,6 +24,17 @@ jobs:
       - name: Test
         run: cargo test
 
+      - name: Install bats-core
+        run: |
+          git clone --depth 1 --branch v1.11.1 \
+            https://github.com/bats-core/bats-core /tmp/bats-core
+          /tmp/bats-core/install.sh /tmp/bats
+
+      - name: Run black-box CLI (bats) suite
+        run: |
+          export PATH="/tmp/bats/bin:$PATH"
+          /tmp/bats/bin/bats tests/cli/observer.bats
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
