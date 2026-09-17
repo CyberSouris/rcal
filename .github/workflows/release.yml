@@ -142,6 +142,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
+        env:
+          RCAL_VERSION: ${{ needs.prepare.outputs.version }}
         run: cargo build --release
 
       - name: Package binary tarball (binary + man page + changelog)

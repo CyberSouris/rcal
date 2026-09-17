@@ -11,11 +11,20 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
+/// Version string emitted by `rcal --version`. Set at build time by build.rs:
+/// an exact version (release builds; see the release pipeline) or, for
+/// devel builds, the last tagged version plus the number of commits since
+/// that tag (git describe), e.g. "0.1.0-3-gabc1234". Falls back to the Cargo
+/// package version if build.rs could not derive anything.
+fn build_version() -> &'static str {
+    option_env!("RCAL_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
 #[derive(Parser)]
 #[command(
     name = "rcal",
     about = "A CLI calendar tool with CalDAV synchronization",
-    version
+    version = build_version()
 )]
 struct Cli {
     #[command(subcommand)]
