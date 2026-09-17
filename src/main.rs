@@ -1169,6 +1169,46 @@ fn select_event_for_delete(
     }
 }
 
+/// Build the "no event found" error for `rcal delete`. The `scope` (which
+/// embeds a server-provided calendar display name) and the `uids` (which come
+/// from untrusted .ics/CalDAV data) are sanitized before being embedded, so a
+/// malicious calendar name or event UID cannot inject terminal escape
+/// sequences through the error message.
+fn delete_no_event_message(time: Option<NaiveTime>, date: NaiveDate, scope: &str) -> String {
+    match time {
+        Some(t) => format!("No event starts at {} on {}{}.", t, date, display::sanitize(scope)),
+        None => format!("No event starts on {}{}.", date, display::sanitize(scope)),
+    }
+}
+
+/// Build the "ambiguous" error for `rcal delete`. Same sanitization contract
+/// as [`delete_no_event_message`]: calendar scope and event UIDs may
+/// originate from an untrusted server and are cleaned before interpolation.
+fn delete_ambiguous_message(
+    time: Option<NaiveTime>,
+    date: NaiveDate,
+    scope: &str,
+    uids: &[String],
+) -> String {
+    let uids = display::sanitize(&uids.join(", "));
+    match time {
+        Some(t) => format!(
+            "Multiple events start at {} on {}{}: {}. Use a more precise time.",
+            t,
+            date,
+            display::sanitize(scope),
+            uids
+        ),
+        None => format!(
+            "Multiple events start on {}{}: {}. Specify an exact start time (YYYY-MM-DD@HH:MM) \
+             or a calendar to restrict to.",
+            date,
+            display::sanitize(scope),
+            uids
+        ),
+    }
+}
+
 /// Handle `rcal delete`: remove an event from the local cache and, when it
 /// belongs to a CalDAV calendar, from the server too. Events cached from an
 /// ICS subscription are only removed locally (the feed re-adds them on the
@@ -1192,34 +1232,19 @@ async fn handle_delete(
         }
         DeleteCalendarFilter::Calendar { id, name } => {
             stored.retain(|s| s.calendar_id.as_deref() == Some(id.as_str()));
-            format!(" in calendar '{}'", name)
+            // Calendar names come from the server's <d:displayname> (or an
+            // ICS feed) and are untrusted; sanitize before any message.
+            format!(" in calendar '{}'", display::sanitize(&name))
         }
     };
 
     let index = match select_event_for_delete(&stored, date, time) {
         DeleteSelection::Found(i) => i,
         DeleteSelection::None_ => {
-            match time {
-                Some(t) => anyhow::bail!("No event starts at {} on {}{}.", t, date, scope),
-                None => anyhow::bail!("No event starts on {}{}.", date, scope),
-            }
+            anyhow::bail!("{}", delete_no_event_message(time, date, &scope))
         }
         DeleteSelection::Ambiguous(uids) => {
-            match time {
-                Some(t) => anyhow::bail!(
-                    "Multiple events start at {} on {}{}: {}. Use a more precise time.",
-                    t,
-                    date,
-                    scope,
-                    uids.join(", ")
-                ),
-                None => anyhow::bail!(
-                    "Multiple events start on {}{}: {}. Specify an exact start time (YYYY-MM-DD@HH:MM) or a calendar to restrict to.",
-                    date,
-                    scope,
-                    uids.join(", ")
-                ),
-            }
+            anyhow::bail!("{}", delete_ambiguous_message(time, date, &scope, &uids))
         }
     };
 
@@ -1556,6 +1581,42 @@ mod tests {
         assert!(err.to_string().contains("Unknown calendar 'Nope'"));
         assert!(err.to_string().contains("Work"));
         assert!(err.to_string().contains("http://x/work/"));
+    }
+
+    // --- delete message sanitization ---------------------------------------
+
+    #[test]
+    fn test_delete_messages_sanitize_untrusted_fields() {
+        let d = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        // Calendar display names and UIDs can come from a CalDAV server or an
+        // .ics file; ESC-based terminal escape sequences must never survive
+        // into an error message.
+        let scope = " in calendar 'Work\x1b[2J'";
+        let uids = vec!["evt-\x1b]0;PWND\x07".to_string(), "other".to_string()];
+
+        let no_event = delete_no_event_message(None, d, scope);
+        assert!(!no_event.contains('\x1b'));
+        assert!(no_event.contains("No event starts on 2024-01-15 in calendar 'Work"));
+
+        let no_event_t = delete_no_event_message(
+            Some(NaiveTime::from_hms_opt(9, 0, 0).unwrap()),
+            d,
+            scope,
+        );
+        assert!(!no_event_t.contains('\x1b'));
+
+        let ambiguous = delete_ambiguous_message(None, d, scope, &uids);
+        assert!(!ambiguous.contains('\x1b'));
+        assert!(ambiguous.contains("evt-"));
+
+        let ambiguous_t = delete_ambiguous_message(
+            Some(NaiveTime::from_hms_opt(9, 0, 0).unwrap()),
+            d,
+            scope,
+            &uids,
+        );
+        assert!(!ambiguous_t.contains('\x1b'));
+        assert!(ambiguous_t.contains("other"));
     }
 
     // --- parse_time -------------------------------------------------------
