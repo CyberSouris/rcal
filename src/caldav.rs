@@ -1066,7 +1066,7 @@ END:VCALENDAR</c:calendar-data>
     #[tokio::test]
     async fn test_sync_pushes_local_events_against_mock_server() {
         use crate::ical::CalendarEvent;
-        use wiremock::matchers::{header, method, path};
+        use wiremock::matchers::{body_string_contains, header, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         const BASE_XML: &str = r#"<?xml version="1.0"?>
@@ -1142,6 +1142,9 @@ END:VCALENDAR</c:calendar-data>
         let put_tmpl = ResponseTemplate::new(201).insert_header("ETag", "\"new-etag\"");
         Mock::given(method("PUT"))
             .and(path("/p/work/local-1.ics"))
+            .and(body_string_contains("UID:local-1"))
+            .and(body_string_contains("SUMMARY:Local only"))
+            .and(body_string_contains("DTSTART:20240201T090000Z"))
             .respond_with(put_tmpl)
             .mount(&server)
             .await;
