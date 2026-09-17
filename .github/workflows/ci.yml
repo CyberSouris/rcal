@@ -26,14 +26,16 @@ jobs:
 
       - name: Install bats-core
         run: |
+          set -euo pipefail
+          mkdir -p /tmp/batscli
           git clone --depth 1 --branch v1.11.1 \
-            https://github.com/bats-core/bats-core /tmp/bats-core
-          /tmp/bats-core/install.sh /tmp/bats
+            https://github.com/bats-core/bats-core /tmp/batscore
+          /tmp/batscore/install.sh /tmp/batscli
 
       - name: Run black-box CLI (bats) suite
         run: |
-          export PATH="/tmp/bats/bin:$PATH"
-          /tmp/bats/bin/bats tests/cli/observer.bats
+          export PATH="/tmp/batscli/bin:$PATH"
+          /tmp/batscli/bin/bats tests/cli/observer.bats
 
   coverage:
     name: Coverage
@@ -48,12 +50,6 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin --locked
-
-      - name: Generate coverage report
-        run: cargo tarpaulin --out lcov --output-dir target/coverage
-
       - name: Install bats-core and llvm coverage tools
         run: |
           set -euo pipefail
@@ -63,33 +59,37 @@ jobs:
           /tmp/batscore/install.sh /tmp/batscli
           rustup component add llvm-tools-preview
 
-      - name: Build binary instrumented for source coverage
+      - name: Build binary and unit-test harness instrumented for coverage
         run: |
           set -euo pipefail
           RUSTFLAGS="-C instrument-coverage" cargo build --bin rcal
+          RUSTFLAGS="-C instrument-coverage" cargo test --no-run
 
-      - name: Drive the CLI (bats) under coverage instrumentation
+      - name: Drive unit tests and the CLI (bats) under one coverage profile
         env:
           LLVM_PROFILE_FILE: /tmp/batsprof/rcal-%p.profraw
         run: |
           set -euo pipefail
           mkdir -p /tmp/batsprof
-          CLI_BATS_RCAL="./target/debug/rcal" \
-            XDG_CONFIG_HOME=/tmp/bacfg XDG_DATA_HOME=/tmp/badata \
-            /tmp/batscli/bin/bats tests/cli/observer.bats
+          cargo test
+          /tmp/batscli/bin/bats tests/cli/observer.bats
 
-      - name: Merge and export CLI coverage to lcov
+      - name: Merge profraws and export a single merged lcov
         run: |
           set -euo pipefail
           COV="$HOME/.rustup/toolchains/$(rustup show active-toolchain | cut -d' ' -f1)/lib/rustlib/x86_64-unknown-linux-gnu/bin"
+          mkdir -p target/coverage
           "$COV/llvm-profdata" merge -sparse /tmp/batsprof/*.profraw \
-            -o /tmp/rcal-cli.profdata
-          "$COV/llvm-cov" export --instr-profile /tmp/rcal-cli.profdata \
-            --format lcov --object ./target/debug/rcal \
-            > target/coverage/rcal-cli.lcov
+            -o /tmp/rcal.profdata
+          TESTBIN="$(find target/debug/deps -maxdepth 1 -type f -perm -u+x -name 'rcal-*' | head -n1)"
+          "$COV/llvm-cov" export --format lcov \
+            --instr-profile /tmp/rcal.profdata \
+            --object ./target/debug/rcal \
+            --object "$TESTBIN" \
+            > target/coverage/merged.lcov
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
         with:
-          files: target/coverage/lcov.info,target/coverage/rcal-cli.lcov
+          files: target/coverage/merged.lcov
           fail_ci_if_error: false
