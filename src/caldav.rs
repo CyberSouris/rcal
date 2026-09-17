@@ -1230,6 +1230,28 @@ END:VCALENDAR</c:calendar-data>
     }
 
     #[tokio::test]
+    async fn test_delete_event_by_uid_sends_delete_for_derived_href() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let work = format!("{}/p/work/", server.uri());
+
+        Mock::given(method("DELETE"))
+            .and(path("/p/work/evt-1.ics"))
+            .and(header("If-Match", "\"etag-1\""))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let client = CalDavClient::from_parts(&server.uri(), "alice", "pw").unwrap();
+        client
+            .delete_event_by_uid(&work, "evt-1", Some("\"etag-1\""))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn test_delete_event_treats_not_found_as_success() {
         let server = wiremock::MockServer::start().await;
 
