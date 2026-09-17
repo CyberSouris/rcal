@@ -54,8 +54,42 @@ jobs:
       - name: Generate coverage report
         run: cargo tarpaulin --out lcov --output-dir target/coverage
 
+      - name: Install bats-core and llvm coverage tools
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/batscli
+          git clone --depth 1 --branch v1.11.1 \
+            https://github.com/bats-core/bats-core /tmp/batscore
+          /tmp/batscore/install.sh /tmp/batscli
+          rustup component add llvm-tools-preview
+
+      - name: Build binary instrumented for source coverage
+        run: |
+          set -euo pipefail
+          RUSTFLAGS="-C instrument-coverage" cargo build --bin rcal
+
+      - name: Drive the CLI (bats) under coverage instrumentation
+        env:
+          LLVM_PROFILE_FILE: /tmp/batsprof/rcal-%p.profraw
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/batsprof
+          CLI_BATS_RCAL="./target/debug/rcal" \
+            XDG_CONFIG_HOME=/tmp/bacfg XDG_DATA_HOME=/tmp/badata \
+            /tmp/batscli/bin/bats tests/cli/observer.bats
+
+      - name: Merge and export CLI coverage to lcov
+        run: |
+          set -euo pipefail
+          COV="$HOME/.rustup/toolchains/$(rustup show active-toolchain | cut -d' ' -f1)/lib/rustlib/x86_64-unknown-linux-gnu/bin"
+          "$COV/llvm-profdata" merge -sparse /tmp/batsprof/*.profraw \
+            -o /tmp/rcal-cli.profdata
+          "$COV/llvm-cov" export --instr-profile /tmp/rcal-cli.profdata \
+            --format lcov --object ./target/debug/rcal \
+            > target/coverage/rcal-cli.lcov
+
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
         with:
-          files: target/coverage/lcov.info
+          files: target/coverage/lcov.info,target/coverage/rcal-cli.lcov
           fail_ci_if_error: false
