@@ -1000,14 +1000,9 @@ fn handle_add_account(
     } else {
         config::Config::default()
     };
-    if config.servers.iter().any(|s| s.url == url) {
+    if !config.add_server(url.clone(), username.clone(), password_command) {
         anyhow::bail!("A server with URL {} is already configured.", url);
     }
-    config.servers.push(config::ServerConfig {
-        url: url.clone(),
-        username: username.clone(),
-        password_command,
-    });
     config.write_to(&path)?;
 
     println!(

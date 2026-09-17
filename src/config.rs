@@ -323,6 +323,25 @@ impl Config {
         true
     }
 
+    /// Add a CalDAV server. Returns `false` (and leaves the config untouched)
+    /// when another server with the same URL is already configured.
+    pub fn add_server(
+        &mut self,
+        url: String,
+        username: String,
+        password_command: Option<String>,
+    ) -> bool {
+        if self.servers.iter().any(|s| s.url == url) {
+            return false;
+        }
+        self.servers.push(ServerConfig {
+            url,
+            username,
+            password_command,
+        });
+        true
+    }
+
     /// The user-assigned `#RRGGBB` color for the calendar called `name`, from
     /// the `[[calendar_colors]]` sections. `None` when the user has not
     /// configured a color for that calendar name.
@@ -491,6 +510,34 @@ mod tests {
         assert_eq!(loaded.servers[1].username, "bob");
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_add_server_deduplicates_by_url() {
+        let mut config = Config::new("https://dav.example.com/", "alice", None);
+        assert!(!config.add_server(
+            "https://dav.example.com/".to_string(),
+            "alice".to_string(),
+            None,
+        ));
+        assert!(config.add_server(
+            "https://other.example.com/".to_string(),
+            "bob".to_string(),
+            None,
+        ));
+        assert_eq!(config.servers.len(), 2);
+        assert!(!config.servers.iter().any(|s| s.url == "https://example.com/"));
+    }
+
+    #[test]
+    fn test_add_server_appends_new_url() {
+        let mut config = Config::new("https://dav.example.com/", "alice", None);
+        assert!(config.add_server(
+            "https://other.example.com/".to_string(),
+            "bob".to_string(),
+            None,
+        ));
+        assert_eq!(config.servers.len(), 2);
     }
 
     #[test]
