@@ -285,6 +285,13 @@ impl Config {
 
     /// Load configuration from a specific path
     pub fn load_from(path: &PathBuf) -> Result<Self> {
+        // Mirror the database's behavior: a config file that may hold a
+        // `password_command` must not stay readable by other local users.
+        // This catches files created with a permissive umask or by older
+        // versions of rcal, not just files written by `write_private`.
+        #[cfg(unix)]
+        Self::secure_permissions_on_load(path);
+
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
 
@@ -292,6 +299,38 @@ impl Config {
             toml::from_str(&content).with_context(|| "Failed to parse config file")?;
 
         Ok(config)
+    }
+
+    /// Restrict a config file to owner-only permissions, warning about files
+    /// that are more permissive than needed. A config reached *through* a
+    /// symlink is left untouched: its target may legitimately live outside
+    /// the config tree (e.g. a dotfiles checkout), and tightening there could
+    /// alter a file the user did not expect rcal to touch.
+    #[cfg(unix)]
+    fn secure_permissions_on_load(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let Ok(meta) = std::fs::symlink_metadata(path) else {
+            return;
+        };
+        if meta.file_type().is_symlink() {
+            return;
+        }
+        let mode = meta.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            match std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+                Ok(()) => eprintln!(
+                    "Warning: {} has permissions {:03o}; restricting to 0600.",
+                    path.display(),
+                    mode
+                ),
+                Err(e) => eprintln!(
+                    "Warning: could not restrict permissions on {}: {}",
+                    path.display(),
+                    e
+                ),
+            }
+        }
     }
 
     /// Get the default config file path
@@ -674,5 +713,51 @@ password_command = "echo secret"
         assert_eq!(mode & 0o777, 0o600);
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_load_tightens_loose_config_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = temp_config_path();
+        Config::new("https://dav.example.com/", "alice", Some("echo secret".to_string()))
+            .write_to(&path)
+            .unwrap();
+
+        // Simulate a config left world-readable by an old version/umask.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.servers.len(), 1);
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "loose config must be tightened on load");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_load_leaves_symlinked_config_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("rcal-symlink-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("real.toml");
+        Config::new("https://dav.example.com/", "alice", None)
+            .write_to(&real)
+            .unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let link = dir.join("link.toml");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        // Loading through the symlink must not chmod the file it points at.
+        let _ = Config::load_from(&link).unwrap();
+        let mode = fs::metadata(&real).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o644, "symlink target must be left untouched");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
