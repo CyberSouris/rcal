@@ -147,6 +147,52 @@ fn is_loopback_host(host: url::Host<&str>) -> bool {
     }
 }
 
+/// Whether following a redirect from `previous` to `next` keeps transport
+/// security intact. An https→http downgrade is never acceptable, even when
+/// host and port stay the same: a compromised or misconfigured server could
+/// otherwise lure a TLS-protected request (with its Basic auth header) onto a
+/// cleartext connection.
+fn redirect_keeps_transport_security(previous: &url::Url, next: &url::Url) -> bool {
+    !(previous.scheme() == "https" && next.scheme() == "http")
+}
+
+/// Redirect policy used by every rcal HTTP client. Normal redirects (limited
+/// to the same 10-hop chain reqwest allows by default) are followed; a
+/// downgrade from https to http stops the chain and surfaces the redirect
+/// response to the caller as an error.
+pub(crate) fn redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        // Replicate reqwest's default hop cap, which a custom policy does not
+        // enforce automatically.
+        if attempt.previous().len() > 10 {
+            return attempt.error("too many redirects");
+        }
+        let downgrades_transport_security = attempt
+            .previous()
+            .last()
+            .map(|p| !redirect_keeps_transport_security(p, attempt.url()))
+            .unwrap_or(false);
+        if downgrades_transport_security {
+            attempt.stop()
+        } else {
+            attempt.follow()
+        }
+    })
+}
+
+/// Build the shared HTTP client: bounded timeouts, stable user agent, and the
+/// downgrade-safe redirect policy.
+pub(crate) fn build_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(concat!("rcal/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .read_timeout(std::time::Duration::from_secs(300))
+        .timeout(std::time::Duration::from_secs(300))
+        .redirect(redirect_policy())
+        .build()
+        .context("Failed to build HTTP client")
+}
+
 /// HTTP client for interacting with a CalDAV server
 pub struct CalDavClient {
     http: reqwest::Client,
@@ -159,15 +205,8 @@ impl CalDavClient {
     pub fn new(server: &ServerConfig) -> Result<Self> {
         validate_scheme(&server.url)?;
         let password = resolve_password(server)?;
-        let http = reqwest::Client::builder()
-            .user_agent(concat!("rcal/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(std::time::Duration::from_secs(30))
-            .read_timeout(std::time::Duration::from_secs(300))
-            .timeout(std::time::Duration::from_secs(300))
-            .build()
-            .context("Failed to build HTTP client")?;
         Ok(Self {
-            http,
+            http: build_http_client()?,
             base_url: server.url.clone(),
             username: server.username.clone(),
             password,
@@ -178,15 +217,8 @@ impl CalDavClient {
     #[cfg(test)]
     pub fn from_parts(base_url: &str, username: &str, password: &str) -> Result<Self> {
         validate_scheme(base_url)?;
-        let http = reqwest::Client::builder()
-            .user_agent(concat!("rcal/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(std::time::Duration::from_secs(30))
-            .read_timeout(std::time::Duration::from_secs(300))
-            .timeout(std::time::Duration::from_secs(300))
-            .build()
-            .context("Failed to build HTTP client")?;
         Ok(Self {
-            http,
+            http: build_http_client()?,
             base_url: base_url.to_string(),
             username: username.to_string(),
             password: password.to_string(),
@@ -921,6 +953,84 @@ END:VCALENDAR</c:calendar-data>
         assert!(validate_scheme("http://127.0.0.2/dav/").is_ok());
         assert!(validate_scheme("http://localhost:5232/").is_ok());
         assert!(validate_scheme("http://[::1]:5232/").is_ok());
+    }
+
+    #[test]
+    fn test_redirect_keeps_transport_security() {
+        let https = |s: &str| url::Url::parse(s).unwrap();
+        // Upgrades (http -> https) and same-scheme redirects stay allowed.
+        assert!(redirect_keeps_transport_security(&https("http://a.example/x"), &https("https://a.example/y")));
+        assert!(redirect_keeps_transport_security(&https("https://a.example/x"), &https("https://a.example/y")));
+        assert!(redirect_keeps_transport_security(&https("https://a.example/x"), &https("https://b.example/y")));
+        assert!(redirect_keeps_transport_security(&https("http://127.0.0.1:5232/x"), &https("http://127.0.0.1:5232/y")));
+        // A downgrade from https to http is refused even when host + port are unchanged.
+        assert!(!redirect_keeps_transport_security(&https("https://a.example:8443/x"), &https("http://a.example:8443/y")));
+        assert!(!redirect_keeps_transport_security(&https("https://a.example/x"), &https("http://b.example/y")));
+    }
+
+    #[tokio::test]
+    async fn test_subscription_follows_same_scheme_redirect() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        const FEED: &str = "BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Test//EN
+BEGIN:VEVENT
+UID:evt-1@example.com
+SUMMARY:Standup
+DTSTART:20240115T090000Z
+DTEND:20240115T100000Z
+END:VEVENT
+END:VCALENDAR";
+
+        let server = MockServer::start().await;
+        let feed_url = format!("{}/old.ics", server.uri());
+
+        // /old.ics redirects (same host, same scheme) to /real.ics.
+        Mock::given(method("GET"))
+            .and(path("/old.ics"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("Location", format!("{}/real.ics", server.uri())),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/real.ics"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(FEED))
+            .mount(&server)
+            .await;
+
+        let db = crate::db::Database::open_from(std::path::Path::new(":memory:")).unwrap();
+        let result =
+            crate::subscribe::refresh_subscription(&db, "Holidays", &feed_url).await.unwrap();
+        assert_eq!((result.added, result.updated, result.deleted), (1, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn test_subscription_refuses_redirect_loop() {
+        // The redirect feature must still be able to *stop* a chain: point the
+        // feed at a URL that redirects back to itself, and confirm the stop
+        // after the hop cap surfaces as an error (rather than hanging).
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let loop_url = format!("{}/loop.ics", server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/loop.ics"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("Location", format!("{}/loop.ics", server.uri())),
+            )
+            .mount(&server)
+            .await;
+
+        let db = crate::db::Database::open_from(std::path::Path::new(":memory:")).unwrap();
+        let result = crate::subscribe::refresh_subscription(&db, "Holidays", &loop_url).await;
+        assert!(result.is_err(), "redirect loop must be terminated by the hop cap");
     }
 
     #[test]

@@ -32,13 +32,7 @@ pub async fn refresh_subscription(
 ) -> Result<SubscriptionRefreshResult> {
     validate_scheme(url)?;
 
-    let http = reqwest::Client::builder()
-        .user_agent(concat!("rcal/", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(std::time::Duration::from_secs(30))
-        .read_timeout(std::time::Duration::from_secs(300))
-        .timeout(std::time::Duration::from_secs(300))
-        .build()
-        .context("Failed to build HTTP client")?;
+    let http = crate::caldav::build_http_client()?;
 
     let resp = http
         .get(url)
