@@ -68,9 +68,10 @@ jobs:
       - name: Drive unit tests and the CLI (bats) under one coverage profile
         env:
           LLVM_PROFILE_FILE: /tmp/batsprof/rcal-%p.profraw
+          RUSTFLAGS: "-C instrument-coverage"
         run: |
           set -euo pipefail
-          mkdir -p /tmp/batsprof
+          mkdir -p /tmp/batsprof target/coverage
           cargo test
           /tmp/batscli/bin/bats tests/cli/observer.bats
 
