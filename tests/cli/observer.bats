@@ -11,6 +11,64 @@
 
 load test_helper
 
+# Write the 5-event import fixture into the sandbox and export its path as
+# TEST_ICS. Embedded here rather than committed at the repo root so the suite
+# is self-contained.
+write_test_ics() {
+    export TEST_ICS="${BATS_TEST_TMPDIR}/test.ics"
+    cat > "${TEST_ICS}" <<'ICS'
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Test Calendar//Test//EN
+X-WR-CALNAME:My Test Calendar
+BEGIN:VEVENT
+DTSTART:20240115T090000Z
+DTEND:20240115T100000Z
+SUMMARY:Team Standup
+DESCRIPTION:Daily team synchronization meeting
+LOCATION:Conference Room A
+UID:evt-001@example.com
+STATUS:CONFIRMED
+END:VEVENT
+BEGIN:VEVENT
+DTSTART:20240115T113000Z
+DTEND:20240115T120000Z
+SUMMARY:Lunch with Alex
+DESCRIPTION:Catch up over lunch
+LOCATION:Cafe Downtown
+UID:evt-002@example.com
+STATUS:CONFIRMED
+END:VEVENT
+BEGIN:VEVENT
+DTSTART:20240115T140000Z
+DTEND:20240115T150000Z
+SUMMARY:Client Call
+DESCRIPTION:Quarterly review call
+UID:evt-003@example.com
+STATUS:TENTATIVE
+END:VEVENT
+BEGIN:VEVENT
+DTSTART:20240120
+DTEND:20240121
+SUMMARY:Workshop Day
+DESCRIPTION:All-day workshop event
+UID:evt-004@example.com
+STATUS:CONFIRMED
+END:VEVENT
+BEGIN:VEVENT
+DTSTART:20240315T100000Z
+DTEND:20240315T120000Z
+SUMMARY:Conference Talk
+DESCRIPTION:Speaking at tech conference
+LOCATION:Main Auditorium
+UID:evt-005@example.com
+STATUS:CONFIRMED
+RRULE:FREQ=YEARLY
+END:VEVENT
+END:VCALENDAR
+ICS
+}
+
 @test "unknown subcommand exits 2 with a clap error" {
     sandbox
     run "${RCAL}" frobnicate
@@ -81,6 +139,7 @@ load test_helper
 
 @test "import --add adds the 5 events, then today/week render them" {
     sandbox
+    write_test_ics
     run "${RCAL}" import --add "${TEST_ICS}" </dev/null
     [ "$status" -eq 0 ]
     [[ "${output}" == *"Parsed calendar: My Test Calendar"* ]]
@@ -99,6 +158,7 @@ load test_helper
 
 @test "import --no-add prints the events then Import cancelled." {
     sandbox
+    write_test_ics
     run "${RCAL}" import "${TEST_ICS}" </dev/null
     [ "$status" -eq 0 ]
     [[ "${output}" == *"Parsed calendar: My Test Calendar"* ]]

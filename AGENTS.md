@@ -193,5 +193,7 @@ Radicale quirks:
 
 ## Test fixtures
 
-`test.ics` (5 events) and `conflicts.ics` (3 events, one genuine overlap) are
-committed fixtures used for import/conflict workflows.
+There are no committed `.ics` fixtures at the repo root. The black-box bats
+suite embeds its sample calendar inline (`write_test_ics` in
+`tests/cli/observer.bats`); import/conflict behavior is otherwise covered
+by the `src/ical.rs` and `src/db.rs` unit tests.

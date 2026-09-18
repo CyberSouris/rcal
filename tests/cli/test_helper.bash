@@ -18,7 +18,6 @@ repo_root() {
 }
 
 export RCAL="$(repo_root)/target/debug/rcal"
-export TEST_ICS="$(repo_root)/test.ics"
 
 # Fresh sandbox per test: pristine XDG env + empty store so no test pollutes
 # another, and the developer's real config/db are never touched.

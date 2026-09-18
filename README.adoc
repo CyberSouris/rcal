@@ -183,8 +183,7 @@ cargo test                  # unit and integration-style tests
 cargo build --release       # optimized build (LTO enabled)
 ----
 
-The specification that drives the project is in *spec.md*. Test fixtures
-`test.ics` and `conflicts.ics` are used by manual workflows.
+The specification that drives the project is in *spec.md*.
 
 == License
 
