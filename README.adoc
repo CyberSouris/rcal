@@ -8,7 +8,7 @@ bidirectionally with any CalDAV server.
 
 image:https://github.com/CyberSouris/rcal/actions/workflows/ci.yml/badge.svg[Build Status, link=https://github.com/CyberSouris/rcal/actions/workflows/ci.yml]
 image:https://img.shields.io/codecov/c/github/CyberSouris/rcal[Coverage, link=https://codecov.io/gh/CyberSouris/rcal]
-image:https://img.shields.io/github/v/release/CyberSouris/rcal[Latest release, link=https://github.com/CyberSouris/rcal/releases]
+image:https://img.shields.io/github/v/release/CyberSouris/rcal?color=blue[Latest release, link=https://github.com/CyberSouris/rcal/releases]
 image:https://img.shields.io/badge/license-GPL--3.0-blue[License: GPL-3.0, link=https://github.com/CyberSouris/rcal]
 image:https://deps.rs/repo/github/CyberSouris/rcal/status.svg[Dependencies, link=https://deps.rs/repo/github/CyberSouris/rcal]
 image:https://img.shields.io/badge/rust-1.88%2B-blue[Rust 1.88+, link=https://rustup.rs]
