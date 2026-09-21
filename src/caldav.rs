@@ -545,13 +545,25 @@ async fn sync_calendar(
                     result.unchanged += 1;
                 }
                 Some(_) => {
-                    db.upsert_event(
-                        &re.event,
-                        Some(&cal.href),
-                        Some(&re.ical_data),
-                        re.etag.as_deref(),
-                    )?;
-                    result.updated += 1;
+                    // The etag moved. Refresh the sync metadata even when the
+                    // payload is identical (e.g. the server re-wrote the
+                    // resource), but only count a real change as "updated".
+                    let details_unchanged = db
+                        .get_ical_data(&cal.href, uid)?
+                        .as_deref()
+                        == Some(re.ical_data.as_str());
+                    if details_unchanged {
+                        db.set_sync_metadata(uid, &cal.href, re.etag.as_deref(), Some(&re.ical_data))?;
+                        result.unchanged += 1;
+                    } else {
+                        db.upsert_event(
+                            &re.event,
+                            Some(&cal.href),
+                            Some(&re.ical_data),
+                            re.etag.as_deref(),
+                        )?;
+                        result.updated += 1;
+                    }
                 }
                 None => {
                     db.insert_event(
@@ -1071,8 +1083,13 @@ END:VCALENDAR";
                 match local_by_uid.get(uid) {
                     Some(ls) if ls.etag.as_deref() == re.etag.as_deref() => result.unchanged += 1,
                     Some(_) => {
-                        db.upsert_event(&re.event, Some(&cal.href), Some(&re.ical_data), re.etag.as_deref()).unwrap();
-                        result.updated += 1;
+                        if db.get_ical_data(&cal.href, uid).unwrap().as_deref() == Some(re.ical_data.as_str()) {
+                            db.set_sync_metadata(uid, &cal.href, re.etag.as_deref(), Some(&re.ical_data)).unwrap();
+                            result.unchanged += 1;
+                        } else {
+                            db.upsert_event(&re.event, Some(&cal.href), Some(&re.ical_data), re.etag.as_deref()).unwrap();
+                            result.updated += 1;
+                        }
                     }
                     None => {
                         db.insert_event(&re.event, Some(&cal.href), Some(&re.ical_data), re.etag.as_deref()).unwrap();
@@ -1149,14 +1166,30 @@ END:VCALENDAR";
             assert_eq!(r.added, 3);
             assert_eq!(db.get_events_for_calendar(&cal.href).unwrap().len(), 3);
 
-            // Second sync: server changed etag2, dropped evt2, added nothing else.
+            // Second sync: evt2 dropped; evt3 got a fresh etag but identical
+            // content. A metadata-only rewrite must not be reported as an
+            // update, and the refreshed etag must be recorded.
             let second = vec![
                 RemoteEvent { etag: Some("\"1\"".into()), event: evt1.clone(), ical_data: "x".into() },
                 RemoteEvent { etag: Some("\"3-new\"".into()), event: evt3.clone(), ical_data: "x".into() },
             ];
             let r = run_sync(&db, &cal, second).await;
-            assert_eq!(r.unchanged, 1);
+            assert_eq!(r.updated, 0, "etag bump with identical payload is not an update");
+            assert_eq!(r.unchanged, 2, "evt-1 untouched, evt-3 payload identical");
             assert_eq!(r.deleted, 1, "evt-2 was removed on the server");
+            assert_eq!(db.get_events_for_calendar(&cal.href).unwrap().len(), 2);
+            let stored = db.get_events_for_calendar(&cal.href).unwrap();
+            let evt3_stored = stored.iter().find(|s| s.event.uid == "evt-3@example.com").unwrap();
+            assert_eq!(evt3_stored.etag.as_deref(), Some("\"3-new\""), "refreshed etag must be persisted");
+
+            // Third sync: evt3's details change for real.
+            let third = vec![
+                RemoteEvent { etag: Some("\"1\"".into()), event: evt1.clone(), ical_data: "x".into() },
+                RemoteEvent { etag: Some("\"3-newer\"".into()), event: evt3.clone(), ical_data: "x2".into() },
+            ];
+            let r = run_sync(&db, &cal, third).await;
+            assert_eq!(r.updated, 1, "evt-3 content changed");
+            assert_eq!(r.unchanged, 1);
             assert_eq!(db.get_events_for_calendar(&cal.href).unwrap().len(), 2);
         });
     }

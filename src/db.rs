@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
 use crate::config::Config;
@@ -592,6 +592,16 @@ impl Database {
             params![uid, calendar_id, etag, ical_data],
         )?;
         Ok(())
+    }
+
+    /// Fetch the raw iCal payload last stored for an event in a calendar.
+    /// Used by the sync path to tell a real detail change from a server that
+    /// merely re-wrote the resource (etag bump with identical content).
+    pub fn get_ical_data(&self, calendar_id: &str, uid: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ical_data FROM events WHERE calendar_id = ?1 AND uid = ?2",
+        )?;
+        Ok(stmt.query_row(params![calendar_id, uid], |row| row.get(0)).optional()?)
     }
 }
 
