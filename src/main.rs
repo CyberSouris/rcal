@@ -1041,10 +1041,11 @@ async fn refresh_subscriptions(
         match subscribe::refresh_subscription(db, &sub.name, &sub.url).await {
             Ok(result) => {
                 println!(
-                    "  {}: +{} added, ~{} updated, -{} deleted",
+                    "  {}: +{} added, ~{} updated, {} unchanged, -{} deleted",
                     display::sanitize(&result.name),
                     result.added,
                     result.updated,
+                    result.unchanged,
                     result.deleted
                 );
             }

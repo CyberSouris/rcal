@@ -14,6 +14,7 @@ pub struct SubscriptionRefreshResult {
     pub name: String,
     pub added: usize,
     pub updated: usize,
+    pub unchanged: usize,
     pub deleted: usize,
 }
 
@@ -21,10 +22,12 @@ pub struct SubscriptionRefreshResult {
 /// subscription's local calendar.
 ///
 /// Events in the feed are upserted; events that were cached for this
-/// subscription but are no longer in the feed are deleted. Callers pass the
-/// display `name` and the feed `url`; the calendar is scoped to `url` so
-/// several subscriptions (or a CalDAV calendar sharing the same UIDs) do not
-/// collide.
+/// subscription but are no longer in the feed are deleted. Feed events whose
+/// details are identical to what is already cached are left untouched and
+/// reported as unchanged (Office365 re-emits whole calendars on every fetch,
+/// so republishing is not an update). Callers pass the display `name` and the
+/// feed `url`; the calendar is scoped to `url` so several subscriptions (or a
+/// CalDAV calendar sharing the same UIDs) do not collide.
 pub async fn refresh_subscription(
     db: &Database,
     name: &str,
@@ -75,20 +78,30 @@ fn apply_calendar(
     };
 
     let local = db.get_events_for_calendar(url)?;
-    let mut local_by_uid: std::collections::HashMap<String, ()> = local
+    let mut local_by_uid: std::collections::HashMap<String, &crate::db::StoredEvent> = local
         .iter()
-        .map(|s| (s.event.uid.clone(), ()))
+        .map(|s| (s.event.uid.clone(), s))
         .collect();
 
     let mut remote_uids: HashSet<String> = HashSet::new();
     for event in &calendar.events {
         remote_uids.insert(event.uid.clone());
-        if local_by_uid.remove(&event.uid).is_some() {
-            result.updated += 1;
-        } else {
-            result.added += 1;
+        match local_by_uid.remove(&event.uid) {
+            Some(stored) if stored.event == *event => {
+                // The feed republished the event with identical details
+                // (Office365 re-emits whole calendars constantly); a
+                // byte-level re-publish is not an update.
+                result.unchanged += 1;
+            }
+            Some(_) => {
+                db.upsert_event(event, Some(url), None, None)?;
+                result.updated += 1;
+            }
+            None => {
+                db.upsert_event(event, Some(url), None, None)?;
+                result.added += 1;
+            }
         }
-        db.upsert_event(event, Some(url), None, None)?;
     }
 
     for uid in local_by_uid.keys() {
@@ -208,13 +221,17 @@ END:VCALENDAR";
         let url = "https://example.com/cal.ics";
 
         let result = apply_calendar(&db, "Feed", url, &parse_ical_text(FEED_ONE).unwrap()).unwrap();
-        assert_eq!((result.added, result.updated, result.deleted), (2, 0, 0));
+        assert_eq!((result.added, result.updated, result.unchanged, result.deleted), (2, 0, 0, 0));
         assert_eq!(db.get_events_for_calendar(url).unwrap().len(), 2);
 
         // The feed dropped evt-1 and renamed evt-2: the stale event is
         // deleted and the surviving one updated.
         let result = apply_calendar(&db, "Feed", url, &parse_ical_text(FEED_TWO).unwrap()).unwrap();
-        assert_eq!((result.added, result.updated, result.deleted), (0, 1, 1));
+        assert_eq!((result.added, result.updated, result.unchanged, result.deleted), (0, 1, 0, 1));
+
+        // Re-applying the identical feed reports nothing as updated.
+        let result = apply_calendar(&db, "Feed", url, &parse_ical_text(FEED_TWO).unwrap()).unwrap();
+        assert_eq!((result.added, result.updated, result.unchanged, result.deleted), (0, 0, 1, 0));
 
         let stored = db.get_events_for_calendar(url).unwrap();
         assert_eq!(stored.len(), 1);
@@ -272,18 +289,20 @@ END:VCALENDAR";
 
         let db = test_db();
         let result = refresh_subscription(&db, "Holidays", &feed_url).await.unwrap();
-        assert_eq!((result.added, result.updated, result.deleted), (2, 0, 0));
+        assert_eq!((result.added, result.updated, result.unchanged, result.deleted), (2, 0, 0, 0));
         assert_eq!(db.get_events_for_calendar(&feed_url).unwrap().len(), 2);
 
         // A local-only event cached for this subscription is removed on the
-        // next refresh even though the feed itself did not change.
+        // next refresh even though the feed itself did not change. The two
+        // feed events were re-emitted with identical details and must not be
+        // reported as updated.
         let ghost = parse_ical_text(GHOST_FEED).unwrap();
         db.insert_event(&ghost.events[0], Some(&feed_url), None, None)
             .unwrap();
         assert_eq!(db.get_events_for_calendar(&feed_url).unwrap().len(), 3);
 
         let result = refresh_subscription(&db, "Holidays", &feed_url).await.unwrap();
-        assert_eq!((result.added, result.updated, result.deleted), (0, 2, 1));
+        assert_eq!((result.added, result.updated, result.unchanged, result.deleted), (0, 0, 2, 1));
         let stored = db.get_events_for_calendar(&feed_url).unwrap();
         assert_eq!(stored.len(), 2);
         assert!(stored.iter().all(|s| s.event.uid != "evt-ghost"));
