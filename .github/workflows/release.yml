@@ -112,7 +112,7 @@ jobs:
           tar -C dist -czf "rcal-$VERSION.tar.gz" "rcal-$VERSION"
 
       - name: Upload source tarball
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rcal-${{ needs.prepare.outputs.version }}-source
           path: rcal-${{ needs.prepare.outputs.version }}.tar.gz
@@ -177,7 +177,7 @@ jobs:
           tar -C dist -czf "$TARBALL" rcal man CHANGELOG
 
       - name: Upload binary tarball
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rcal-${{ needs.prepare.outputs.version }}-${{ matrix.target }}
           path: ${{ env.TARBALL }}
@@ -191,7 +191,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Download tarballs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release-assets
           merge-multiple: true
