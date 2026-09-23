@@ -165,3 +165,192 @@ ICS
     [[ "${output}" == *"Found 5 events"* ]]
     [[ "${output}" == *"Import cancelled."* ]]
 }
+
+@test "month on an empty store renders the grid without event markers" {
+    sandbox
+    run "${RCAL}" month --month 2024-01
+    [ "$status" -eq 0 ]
+    [[ "${output}" == *"January 2024"* ]]
+    [[ "${output}" == *"Sun"* ]]
+    [[ "${output}" == *"Sat"* ]]
+    [[ "${output}" != *"●"* ]]
+}
+
+@test "month marks event days after import, and --agenda lists them" {
+    sandbox
+    write_test_ics
+    run "${RCAL}" import --add "${TEST_ICS}" </dev/null
+    [ "$status" -eq 0 ]
+
+    run "${RCAL}" month --month 2024-01
+    [ "$status" -eq 0 ]
+    [[ "${output}" == *"January 2024"* ]]
+    # Jan 15 holds the three timed events; Jan 20 the all-day workshop.
+    [[ "${output}" == *"15 ●●●"* ]]
+    [[ "${output}" == *"20 ●"* ]]
+    [[ "${output}" == *"21"* ]]
+
+    run "${RCAL}" month --month 2024-01 --agenda
+    [ "$status" -eq 0 ]
+    [[ "${output}" == *"Monday January 15, 2024"* ]]
+    [[ "${output}" == *"Team Standup"* ]]
+    [[ "${output}" == *"Lunch with Alex"* ]]
+    [[ "${output}" == *"Workshop Day"* ]]
+}
+
+@test "month --details expands each event" {
+    sandbox
+    write_test_ics
+    run "${RCAL}" import --add "${TEST_ICS}" </dev/null
+    [ "$status" -eq 0 ]
+
+    run "${RCAL}" month --month 2024-01 --details
+    [ "$status" -eq 0 ]
+    [[ "${output}" == *"January 2024"* ]]
+    [[ "${output}" == *"Team Standup [CONFIRMED]"* ]]
+    [[ "${output}" == *"  Time:         "* ]]
+    [[ "${output}" == *"Workshop Day"* ]]
+}
+
+@test "new adds a local event, then today renders it" {
+    sandbox
+    run "${RCAL}" new --title "Catch-up with Bo" \
+        --date 2024-01-16 --time 14:30 --duration 45 \
+        --location "Cafe" --description "quarterly sync" </dev/null
+    [ "$status" -eq 0 ]
+    [[ "${output}" == *"Catch-up with Bo"* ]]
+    [[ "${output}" == *"2024-01-16 14:30 to 15:15"* ]]
+    [[ "${output}" == *"Event added."* ]]
+
+    run "${RCAL}" today --date 2024-01-16
+    [ "$status" -eq 0 ]
+    [[ "${output}" == *"Tuesday, January 16, 2024"* ]]
+    [[ "${output}" == *"Catch-up with Bo"* ]]
+    [[ "${output}" == *"14:30 - 15:15"* ]]
+    [[ "${output}" == *"at Cafe"* ]]
+}
+
+@test "new without --title fails non-interactively" {
+    sandbox
+    run "${RCAL}" new --date 2024-01-16 </dev/null
+    [ "$status" -eq 1 ]
+    [[ "${output}" == *"Missing required --title"* ]]
+}
+
+@test "new with an unknown --calendar exits 1" {
+    sandbox
+    run "${RCAL}" new --title "Party" --date 2024-01-16 --calendar nope </dev/null
+    [ "$status" -eq 1 ]
+    [[ "${output}" == *"Unknown calendar 'nope'"* ]]
+}
+
+@test "new --all-day stores an all-day event" {
+    sandbox
+    run "${RCAL}" new --title "May Day" --all-day \
+        --date 2024-05-01 --location "Beach" </dev/null
+    [ "$status" -eq 0 ]
+    [[ "${output}" == *"May Day"* ]]
+    [[ "${output}" == *"All day (2024-05-01 to 2024-05-02)"* ]]
+    [[ "${output}" == *"Event added."* ]]
+
+    run "${RCAL}" today --date 2024-05-01
+    [ "$status" -eq 0 ]
+    [[ "${output}" == *"May Day"* ]]
+    [[ "${output}" == *"at Beach"* ]]
+}
+
+@test "show with a time renders the single event's details" {
+    sandbox
+    run "${RCAL}" new --title "Single" \
+        --date 2024-01-19 --time 10:00 --location "Room 4" </dev/null
+    [ "$status" -eq 0 ]
+
+    run "${RCAL}" show 2024-01-19@10:00
+    [ "$status" -eq 0 ]
+    [[ "${output}" == *"Single [CONFIRMED]"* ]]
+    [[ "${output}" == *"  Time:         10:00 - 11:00"* ]]
+    [[ "${output}" == *"  Location:     Room 4"* ]]
+    [[ "${output}" == *"  Link:         (none)"* ]]
+}
+
+@test "search finds a newly added event" {
+    sandbox
+    run "${RCAL}" new --title "Quarterly Review" \
+        --date 2024-02-01 --time 09:00 </dev/null
+    [ "$status" -eq 0 ]
+
+    run "${RCAL}" search "Quarterly"
+    [ "$status" -eq 0 ]
+    [[ "${output}" == *"Found 1 event(s) matching 'Quarterly':"* ]]
+    [[ "${output}" == *"Quarterly Review"* ]]
+}
+
+@test "delete --force removes a local event" {
+    sandbox
+    run "${RCAL}" new --title "Catch-up with Bo" \
+        --date 2024-01-16 --time 14:30 </dev/null
+    [ "$status" -eq 0 ]
+
+    run "${RCAL}" delete 2024-01-16@14:30 --force </dev/null
+    [ "$status" -eq 0 ]
+    [[ "${output}" == *"Delete event: Catch-up with Bo"* ]]
+    [[ "${output}" == *"2024-01-16 14:30 to 15:30"* ]]
+    [[ "${output}" == *"Calendar: local (no calendar)"* ]]
+    [[ "${output}" == *"Event deleted (local)."* ]]
+
+    run "${RCAL}" today --date 2024-01-16
+    [ "$status" -eq 0 ]
+    [[ "${output}" == *"No events today."* ]]
+}
+
+@test "delete without --force refuses to run non-interactively" {
+    sandbox
+    run "${RCAL}" new --title "Catch-up with Bo" \
+        --date 2024-01-16 --time 14:30 </dev/null
+    [ "$status" -eq 0 ]
+
+    run "${RCAL}" delete 2024-01-16@14:30 </dev/null
+    [ "$status" -eq 1 ]
+    [[ "${output}" == *"Delete event: Catch-up with Bo"* ]]
+    [[ "${output}" == *"Refusing to delete without confirmation; pass --force."* ]]
+}
+
+@test "delete a bare date deletes the lone event that day" {
+    sandbox
+    run "${RCAL}" new --title "Solo" --date 2024-01-16 --time 09:00 </dev/null
+    [ "$status" -eq 0 ]
+
+    run "${RCAL}" delete 2024-01-16 --force </dev/null
+    [ "$status" -eq 0 ]
+    [[ "${output}" == *"Delete event: Solo"* ]]
+    [[ "${output}" == *"Event deleted (local)."* ]]
+}
+
+@test "delete a bare date with several events is ambiguous" {
+    sandbox
+    run "${RCAL}" new --title "Morning" --date 2024-01-17 --time 09:00 </dev/null
+    run "${RCAL}" new --title "Evening" --date 2024-01-17 --time 19:00 </dev/null
+
+    run "${RCAL}" delete 2024-01-17 --force </dev/null
+    [ "$status" -eq 1 ]
+    [[ "${output}" == *"Multiple events start on 2024-01-17"* ]]
+    [[ "${output}" == *"Specify an exact start time (YYYY-MM-DD@HH:MM)"* ]]
+}
+
+@test "delete --calendar local targets local events" {
+    sandbox
+    run "${RCAL}" new --title "Morning" --date 2024-01-17 --time 09:00 </dev/null
+    [ "$status" -eq 0 ]
+
+    run "${RCAL}" delete 2024-01-17 --calendar local --force </dev/null
+    [ "$status" -eq 0 ]
+    [[ "${output}" == *"Delete event: Morning"* ]]
+    [[ "${output}" == *"Event deleted (local)."* ]]
+}
+
+@test "delete of a day with no events exits 1" {
+    sandbox
+    run "${RCAL}" delete 2024-01-16 --force </dev/null
+    [ "$status" -eq 1 ]
+    [[ "${output}" == *"No event starts on 2024-01-16."* ]]
+}
