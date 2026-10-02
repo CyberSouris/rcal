@@ -31,6 +31,10 @@ struct Cli {
     /// Subcommand; when omitted, the default view from the config
     /// ([display] default_view) is shown.
     command: Option<Commands>,
+
+    /// Show all details of each event (applies to default view)
+    #[arg(long)]
+    details: bool,
 }
 
 #[derive(Subcommand)]
@@ -217,6 +221,7 @@ enum Commands {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    let global_details = cli.details;
     match cli.command {
         Some(Commands::Today { details, next, date }) => {
             let base = match date {
@@ -224,17 +229,17 @@ async fn main() -> anyhow::Result<()> {
                 None => Local::now().date_naive(),
             };
             let date = base + Days::new(next as u64);
-            show_day(date, None, details)
+            show_day(date, None, details || global_details)
         }
         Some(Commands::Week { date, next, agenda, details }) => {
-            show_week(date, next, agenda, details)
+            show_week(date, next, agenda, details || global_details)
         }
         Some(Commands::Month { month, next, agenda, details }) => {
-            show_month(month, next, agenda, details)
+            show_month(month, next, agenda, details || global_details)
         }
         Some(Commands::Show { date, details }) => {
             let (date, time) = parse_show_arg(&date)?;
-            show_day(date, time, details)
+            show_day(date, time, details || global_details)
         }
         Some(Commands::Import {
             file,
@@ -396,7 +401,7 @@ async fn main() -> anyhow::Result<()> {
             password_command,
             force,
         }) => handle_add_account(url, username, password_command, force),
-        None => run_default_view(),
+        None => run_default_view(global_details),
     }
 }
 
@@ -549,15 +554,15 @@ fn show_month(
 
 /// Handle `rcal` invoked without a subcommand: show the default view
 /// configured in `[display] default_view` (today if no config file exists).
-fn run_default_view() -> anyhow::Result<()> {
+fn run_default_view(details: bool) -> anyhow::Result<()> {
     let default_view = config::Config::load()
         .map(|c| c.display.default_view)
         .unwrap_or_else(|_| "today".to_string());
 
     match default_view.as_str() {
-        "today" => show_day(Local::now().date_naive(), None, false),
-        "week" => show_week(None, 0, false, false),
-        "month" => show_month(None, 0, false, false),
+        "today" => show_day(Local::now().date_naive(), None, details),
+        "week" => show_week(None, 0, false, details),
+        "month" => show_month(None, 0, false, details),
         other => anyhow::bail!(
             "Invalid default_view '{}' in config; expected one of: today, week, month.",
             other
