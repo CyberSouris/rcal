@@ -74,7 +74,7 @@ ICS
     run "${RCAL}" frobnicate
     [ "$status" -eq 2 ]
     [[ "${output}" == *"unrecognized subcommand 'frobnicate'"* ]]
-    [[ "${output}" == *"Usage: rcal [COMMAND]"* ]]
+    [[ "${output}" == *"Usage: rcal"* ]]
 }
 
 @test "unknown flag on today exits 2 with a clap error" {
@@ -353,4 +353,11 @@ ICS
     run "${RCAL}" delete 2024-01-16 --force </dev/null
     [ "$status" -eq 1 ]
     [[ "${output}" == *"No event starts on 2024-01-16."* ]]
+}
+
+@test "--details without subcommand works on empty store" {
+    sandbox
+    run "${RCAL}" --details
+    [ "$status" -eq 0 ]
+    [[ "${output}" == *"No events today."* ]]
 }
