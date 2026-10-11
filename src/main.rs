@@ -671,7 +671,7 @@ fn handle_import(file: &std::path::Path, add: bool, dry_run: bool) -> anyhow::Re
         print!("\nAdd all {} events to calendar? [y/N]: ", calendar.events.len());
         io::stdout().flush()?;
 
-        let mut input = String::new();
+        let mut input = String::default();
         io::stdin().read_line(&mut input)?;
         let answer = input.trim().to_lowercase();
 
@@ -1231,7 +1231,7 @@ async fn handle_delete(
     let mut stored = db.get_stored_events_for_day(date)?;
 
     let scope = match resolve_delete_calendar(calendar, &db.get_calendars()?)? {
-        DeleteCalendarFilter::None => String::new(),
+        DeleteCalendarFilter::None => String::default(),
         DeleteCalendarFilter::Local => {
             stored.retain(|s| s.calendar_id.is_none());
             " in calendar 'local'".to_string()
@@ -1330,7 +1330,7 @@ fn prompt(label: &str, default: Option<&str>) -> anyhow::Result<Option<String>> 
     print!("{}", prompt_text);
     io::stdout().flush()?;
 
-    let mut input = String::new();
+    let mut input = String::default();
     io::stdin().read_line(&mut input)?;
     let trimmed = input.trim().to_string();
     if trimmed.is_empty() {

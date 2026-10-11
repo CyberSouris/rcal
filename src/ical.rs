@@ -163,8 +163,8 @@ fn parse_event(
     ical_event: &ical::parser::ical::component::IcalEvent,
     timezones: &[TimeZoneDef],
 ) -> Result<Option<CalendarEvent>> {
-    let mut uid = String::new();
-    let mut summary = String::new();
+    let mut uid = String::default();
+    let mut summary = String::default();
     let mut description = None;
     let mut location = None;
     let mut url = None;
@@ -520,7 +520,7 @@ pub fn parse_ical_datetime(value: &str) -> Result<DateTime<Utc>> {
 /// The output is a complete VCALENDAR with a single VEVENT, suitable
 /// for PUT-ing to a CalDAV server or exporting to a file.
 pub fn export_ical(event: &CalendarEvent) -> String {
-    let mut out = String::new();
+    let mut out = String::default();
 
     out.push_str("BEGIN:VCALENDAR\r\n");
     out.push_str("VERSION:2.0\r\n");
@@ -638,7 +638,7 @@ fn strip_control_chars(value: &str) -> String {
 
     /// Fold a content line to RFC 5545's 75-octet limit using CRLF + space.
 fn fold_line(line: &str) -> String {
-    let mut result = String::new();
+    let mut result = String::default();
     let mut remaining = line;
     let mut first = true;
     while !remaining.is_empty() {

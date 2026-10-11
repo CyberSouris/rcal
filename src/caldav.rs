@@ -245,7 +245,7 @@ impl CalDavClient {
     /// than [`MAX_RESPONSE_BYTES`]. A hostile or misbehaving server must not
     /// be able to exhaust client memory.
     async fn read_body_limited(&self, resp: reqwest::Response) -> Result<String> {
-        let mut body = String::new();
+        let mut body = String::default();
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.context("Failed to read response body chunk")?;
@@ -645,7 +645,7 @@ fn fnv1a(data: &[u8]) -> u64 {
 
 /// Percent-encode a path segment for use in a URL.
 fn urlencode_path_segment(s: &str) -> String {
-    let mut out = String::new();
+    let mut out = String::default();
     for b in s.bytes() {
         match b {
             b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {

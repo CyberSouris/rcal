@@ -140,7 +140,7 @@ fn is_loopback_host(host: url::Host<&str>) -> bool {
 /// Read a response body into a String, aborting if the server sends more
 /// than [`MAX_RESPONSE_BYTES`].
 async fn read_body_limited(resp: reqwest::Response) -> Result<String> {
-    let mut body = String::new();
+    let mut body = String::default();
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("Failed to read response body chunk")?;
