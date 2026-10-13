@@ -57,9 +57,12 @@ cargo test           # run the full suite (unit + mock-server tests)
   `prompt`, `parse_time`, `parse_date`, `parse_month`, sync output rendering.
   View plumbing: `show_day`/`show_week`/`show_month` build `ColoredEvent`
   lists via `colored_events()` (resolution: config `[[calendar_colors]]`
-  color matched on calendar name -> `[display] accent_color` fallback) with
-  `calendar_color_map()` (reads colors from the config, not the DB) /
-  `accent_color()` helpers; `find_event_at_time` takes `Vec<&CalendarEvent>`.
+  color matched on calendar name -> `[display] accent_color` fallback, plus
+  the calendar display name) with `calendar_meta_map()` (reads names/colors
+  from the DB/config, not the DB colors) / `accent_color()` helpers;
+  `show_month` passes `terminal_width()` (libc `TIOCGWINSZ`, 80-col
+  fallback) to `render_month`; `find_event_at_time` takes
+  `Vec<&CalendarEvent>`.
 - `src/config.rs` — TOML config, default paths, `write_to` (used by
   `rcal add-account`). `Config::servers` is a `Vec<ServerConfig>`; a legacy
   single `[server]` table is accepted on load and merged into `servers` at
@@ -89,10 +92,16 @@ cargo test           # run the full suite (unit + mock-server tests)
 - `src/subscribe.rs` — ICS subscription fetch (`refresh_subscription`),
   full-replace sync logic (`apply_calendar`), scheme validation, tests.
 - `src/display.rs` — day/week/month renderers; `ColoredEvent { event,
-  color }` (with `Deref` to `CalendarEvent`) carries each event's accent
-  color; `colorize` / `pad_to_width` / `visible_width` utilities for ANSI
-  24-bit foreground accent coloring. Render signatures take
-  `&[ColoredEvent]` (or `Option<&str>` for single-detail rendering).
+  color, calendar }` (with `Deref` to `CalendarEvent`) carries each event's
+  accent color and its calendar name; `colorize` / `pad_to_width` /
+  `visible_width` utilities for ANSI 24-bit foreground accent coloring.
+  Render signatures take `&[ColoredEvent]` (or `Option<&str>` for
+  single-detail rendering). `render_month` takes `term_width: usize` and
+  appends a per-calendar event listing below the grid
+  (`render_calendar_columns`): one column per calendar, packed as many per
+  row as fit in `term_width` and wrapping the rest onto later rows, each
+  column headed by its (colored) calendar name and listing one
+  `Mon DD HH:MM summary` line per event.
 
 Key signatures to remember:
 
