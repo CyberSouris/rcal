@@ -90,7 +90,7 @@ pub fn render_day(events: &[ColoredEvent], date: NaiveDate) -> String {
     let today = Local::now().date_naive();
     let is_today = date == today;
 
-    let mut output = String::new();
+    let mut output = String::default();
 
     // Header
     let title = if is_today {
@@ -137,7 +137,7 @@ pub fn render_day_details(events: &[ColoredEvent], date: NaiveDate) -> String {
     let today = Local::now().date_naive();
     let is_today = date == today;
 
-    let mut output = String::new();
+    let mut output = String::default();
 
     // Header
     let title = if is_today {
@@ -175,7 +175,7 @@ pub fn render_day_details(events: &[ColoredEvent], date: NaiveDate) -> String {
 
 /// Render every field of a single event as a labelled block
 pub fn render_event_details(event: &CalendarEvent, color: Option<&str>) -> String {
-    let mut output = String::new();
+    let mut output = String::default();
 
     let status = event
         .status
@@ -241,7 +241,7 @@ pub fn render_week(
 
     let today = Local::now().date_naive();
 
-    let mut output = String::new();
+    let mut output = String::default();
 
     // Header
     let title = format!(
@@ -259,7 +259,7 @@ pub fn render_week(
     let rule = std::iter::repeat("-".repeat(COL_WIDTH)).take(7).collect::<Vec<_>>().join("|");
 
     // Day header row
-    let mut header = String::new();
+    let mut header = String::default();
     for i in 0..7 {
         if i > 0 {
             header.push('|');
@@ -424,14 +424,14 @@ pub fn render_week(
                 .map(|(line, color)| colorize(line, *color))
                 .collect();
             if cell_lines.is_empty() {
-                cell_lines.push(String::new());
+                cell_lines.push(String::default());
             }
             height = height.max(cell_lines.len());
             columns.push(cell_lines);
         }
 
         for l in 0..height {
-            let mut line = String::new();
+            let mut line = String::default();
             for (d, cell_lines) in columns.iter().enumerate() {
                 if d > 0 {
                     line.push('|');
@@ -468,7 +468,7 @@ fn render_day_listing(
     details: bool,
 ) -> String {
     let today = Local::now().date_naive();
-    let mut output = String::new();
+    let mut output = String::default();
 
     let mut day = first;
     while day <= last {
@@ -520,8 +520,8 @@ fn render_day_listing(
 /// are hard-split. When the text does not fit, the last line ends with an
 /// ellipsis.
 fn wrap_cell(text: &str, width: usize, max_lines: usize) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
-    let mut line = String::new();
+    let mut lines: Vec<String> = Vec::default();
+    let mut line = String::default();
 
     for word in text.split_whitespace() {
         let fits = if line.is_empty() {
@@ -541,7 +541,7 @@ fn wrap_cell(text: &str, width: usize, max_lines: usize) -> Vec<String> {
         lines.push(line);
     }
     if lines.is_empty() {
-        return vec![String::new()];
+        return vec![String::default()];
     }
 
     // Hard-break any line longer than the column width.
@@ -600,7 +600,7 @@ pub fn render_month(
     // Padding before first day
     let leading_blanks = first_day.weekday().num_days_from_sunday() as usize;
 
-    let mut output = String::new();
+    let mut output = String::default();
 
     // Header
     let today = Local::now().date_naive();
@@ -616,7 +616,7 @@ pub fn render_month(
     ));
 
     // Group events by day, keeping each event's accent color for the markers
-    let mut events_by_day: HashMap<u32, Vec<Option<String>>> = HashMap::new();
+    let mut events_by_day: HashMap<u32, Vec<Option<String>>> = HashMap::default();
     for event in events {
         if let Some(event_date) = event_date(&event.event) {
             if event_date.year() == year && event_date.month() == month_num {
@@ -629,15 +629,15 @@ pub fn render_month(
     }
 
     // Build the calendar grid
-    let mut week_rows: Vec<String> = Vec::new();
-    let mut row = String::new();
+    let mut week_rows: Vec<String> = Vec::default();
+    let mut row = String::default();
 
     for i in 0..(leading_blanks + days_in_month.day() as usize) {
         if i % 7 == 0 {
             if i > 0 {
                 week_rows.push(std::mem::take(&mut row));
             }
-            row = String::new();
+            row = String::default();
         }
         if i < leading_blanks {
             row.push_str(&format!("{:^6} ", ""));
