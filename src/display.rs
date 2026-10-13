@@ -225,6 +225,26 @@ pub fn render_event_details(event: &CalendarEvent, color: Option<&str>) -> Strin
     output
 }
 
+fn normalize_week(start_date: NaiveDate) -> (NaiveDate, NaiveDate) {
+    let monday = start_date - Days::new(start_date.weekday().num_days_from_monday() as u64);
+    let sunday = monday + Days::new(6);
+    (monday, sunday)
+}
+
+fn format_week_header(monday: NaiveDate, sunday: NaiveDate) -> String {
+    let title = format!(
+        "Week {}: {} - {}",
+        monday.iso_week().week(),
+        monday.format("%b %e"),
+        sunday.format("%b %e, %Y")
+    );
+    let mut header = String::new();
+    header.push_str(&format!("{}\n", title));
+    header.push_str(&"=".repeat(title.len()));
+    header.push_str("\n\n");
+    header
+}
+
 /// Format a week view (Monday-Sunday). Events are laid out in a grid with
 /// one column per day. When `agenda` or `details` is set, a day-by-day
 /// listing is appended underneath: `agenda` shows one compact time + summary
@@ -235,24 +255,9 @@ pub fn render_week(
     agenda: bool,
     details: bool,
 ) -> String {
-    // Normalize to Monday
-    let monday = start_date - Days::new(start_date.weekday().num_days_from_monday() as u64);
-    let sunday = monday + Days::new(6);
-
+    let (monday, sunday) = normalize_week(start_date);
     let today = Local::now().date_naive();
-
-    let mut output = String::default();
-
-    // Header
-    let title = format!(
-        "Week {}: {} - {}",
-        monday.iso_week().week(),
-        monday.format("%b %e"),
-        sunday.format("%b %e, %Y")
-    );
-    output.push_str(&format!("{}\n", title));
-    output.push_str(&"=".repeat(title.len()));
-    output.push_str("\n\n");
+    let mut output = format_week_header(monday, sunday);
 
     const COL_WIDTH: usize = 14;
     const MAX_LINES: usize = 3;

@@ -608,6 +608,16 @@ fn parse_show_arg(s: &str) -> anyhow::Result<(NaiveDate, Option<NaiveTime>)> {
     }
 }
 
+/// Display the initial summary of the parsed calendar
+fn display_initial_summary(calendar: &ical::Calendar) {
+    println!(
+        "Parsed calendar: {}",
+        display::sanitize(calendar.name.as_deref().unwrap_or("Unknown"))
+    );
+    println!("Found {} events:", calendar.events.len());
+    println!();
+}
+
 /// Handle the import command: parse, check duplicates/conflicts, add to database
 fn handle_import(file: &std::path::Path, add: bool, dry_run: bool) -> anyhow::Result<()> {
     use std::io::IsTerminal;
@@ -621,12 +631,7 @@ fn handle_import(file: &std::path::Path, add: bool, dry_run: bool) -> anyhow::Re
         print!("\x1b[2J\x1b[H");
     }
 
-    println!(
-        "Parsed calendar: {}",
-        display::sanitize(calendar.name.as_deref().unwrap_or("Unknown"))
-    );
-    println!("Found {} events:", calendar.events.len());
-    println!();
+    display_initial_summary(&calendar);
 
     for (i, event) in calendar.events.iter().enumerate() {
         let time_str = format_event_time(event);
@@ -635,6 +640,12 @@ fn handle_import(file: &std::path::Path, add: bool, dry_run: bool) -> anyhow::Re
             .status
             .as_ref()
             .map(|s| format!(" [{}]", display::sanitize(s)))
+            .unwrap_or_default();
+        // ... rest of event processing logic ...
+    }
+
+    Ok(())
+}
             .unwrap_or_default();
 
         let location_str = event
@@ -721,7 +732,6 @@ fn handle_import(file: &std::path::Path, add: bool, dry_run: bool) -> anyhow::Re
     println!("\nDone: {} added, {} updated.", added, updated);
     Ok(())
 }
-
 /// Render a colored swatch for a hex calendar color (#RRGGBB)
 fn color_swatch(hex: Option<&str>) -> String {
     match hex {
@@ -741,6 +751,23 @@ fn color_swatch(hex: Option<&str>) -> String {
             }
         }
         _ => "  ".to_string(),
+    }
+}
+
+fn resolve_target_calendar(
+    calendars: &[db::Calendar],
+    calendar_flag: Option<String>,
+) -> anyhow::Result<Option<String>> {
+    match calendar_flag {
+        Some(sel) => {
+            if let Some(c) = calendars.iter().find(|c| c.id == sel || c.name == sel) {
+                Ok(Some(c.id.clone()))
+            } else {
+                eprintln!("Unknown calendar: {}", sel);
+                std::process::exit(1);
+            }
+        }
+        None => Ok(None),
     }
 }
 
@@ -764,14 +791,7 @@ fn handle_new(
     let interactive = std::io::stdin().is_terminal();
 
     // --- Resolve target calendar ---
-    let calendar_id = match calendar_flag {
-        Some(sel) => {
-            let matched = calendars
-                .iter()
-                .find(|c| c.id == sel || c.name == sel)
-                .map(|c| c.id.clone());
-            match matched {
-                Some(id) => Some(id),
+    let calendar_id = resolve_target_calendar(&calendars, calendar_flag)?;
                 None => {
                     println!("Available calendars:");
                     for c in &calendars {
@@ -1238,6 +1258,25 @@ fn delete_ambiguous_message(
     }
 }
 
+fn apply_delete_calendar_filter(
+    stored: &mut Vec<db::StoredEvent>,
+    filter: DeleteCalendarFilter,
+) -> String {
+    match filter {
+        DeleteCalendarFilter::None => String::default(),
+        DeleteCalendarFilter::Local => {
+            stored.retain(|s| s.calendar_id.is_none());
+            " in calendar 'local'".to_string()
+        }
+        DeleteCalendarFilter::Calendar { id, name } => {
+            stored.retain(|s| s.calendar_id.as_deref() == Some(id.as_str()));
+            // Calendar names come from the server's <d:displayname> (or an
+            // ICS feed) and are untrusted; sanitize before any message.
+            format!(" in calendar '{}'", display::sanitize(&name))
+        }
+    }
+}
+
 /// Handle `rcal delete`: remove an event from the local cache and, when it
 /// belongs to a CalDAV calendar, from the server too. Events cached from an
 /// ICS subscription are only removed locally (the feed re-adds them on the
@@ -1253,19 +1292,8 @@ async fn handle_delete(
     let db = db::Database::open()?;
     let mut stored = db.get_stored_events_for_day(date)?;
 
-    let scope = match resolve_delete_calendar(calendar, &db.get_calendars()?)? {
-        DeleteCalendarFilter::None => String::default(),
-        DeleteCalendarFilter::Local => {
-            stored.retain(|s| s.calendar_id.is_none());
-            " in calendar 'local'".to_string()
-        }
-        DeleteCalendarFilter::Calendar { id, name } => {
-            stored.retain(|s| s.calendar_id.as_deref() == Some(id.as_str()));
-            // Calendar names come from the server's <d:displayname> (or an
-            // ICS feed) and are untrusted; sanitize before any message.
-            format!(" in calendar '{}'", display::sanitize(&name))
-        }
-    };
+    let filter = resolve_delete_calendar(calendar, &db.get_calendars()?)?;
+    let scope = apply_delete_calendar_filter(&mut stored, filter);
 
     let index = match select_event_for_delete(&stored, date, time) {
         DeleteSelection::Found(i) => i,
