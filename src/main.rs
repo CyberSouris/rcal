@@ -17,7 +17,7 @@ use std::path::PathBuf;
 /// that tag (git describe), e.g. "0.1.0-3-gabc1234". Falls back to the Cargo
 /// package version if build.rs could not derive anything.
 fn build_version() -> &'static str {
-    option_env!("RCAL_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+    option_env!("RCAL_BUILD_VERSION").unwrap_or_else(|| env!("CARGO_PKG_VERSION"))
 }
 
 #[derive(Parser)]

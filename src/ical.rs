@@ -47,7 +47,7 @@ impl TimeZoneDef {
         let index = instants
             .iter()
             .rposition(|(dt, _)| *dt <= local)
-            .unwrap_or(instants.len() - 1);
+            .unwrap_or_else(|| instants.len() - 1);
         Some(instants[index].1)
     }
 }
@@ -646,7 +646,7 @@ fn fold_line(line: &str) -> String {
             .char_indices()
             .nth(75)
             .map(|(i, _)| i)
-            .unwrap_or(remaining.len());
+            .unwrap_or_else(|| remaining.len());
         let chunk = &remaining[..take];
         if first {
             result.push_str(chunk);
