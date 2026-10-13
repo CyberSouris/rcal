@@ -25,6 +25,9 @@ pub fn sanitize_multiline(s: &str) -> String {
 pub struct ColoredEvent {
     pub event: CalendarEvent,
     pub color: Option<String>,
+    /// Display name of the calendar the event belongs to (`None` for
+    /// local-only events), used to group the month view's event columns.
+    pub calendar: Option<String>,
 }
 
 impl std::ops::Deref for ColoredEvent {
@@ -569,15 +572,19 @@ fn wrap_cell(text: &str, width: usize, max_lines: usize) -> Vec<String> {
     }
     broken
 }
-/// Format a month view (calendar grid). When `agenda` or `details` is set, a
-/// day-by-day listing is appended underneath: `agenda` shows one compact
-/// time + summary line per event, `details` expands every event with
-/// [`render_event_details`].
+
+/// Format a month view (calendar grid). Below the grid comes a per-calendar
+/// event listing (see [`render_calendar_columns`]); `term_width` is the
+/// terminal width in columns and controls how many calendar columns fit side
+/// by side. When `agenda` or `details` is set, a day-by-day listing is
+/// appended after that: `agenda` shows one compact time + summary line per
+/// event, `details` expands every event with [`render_event_details`].
 pub fn render_month(
     events: &[ColoredEvent],
     month: NaiveDate,
     agenda: bool,
     details: bool,
+    term_width: usize,
 ) -> String {
     let year = month.year();
     let month_num = month.month();
@@ -654,12 +661,151 @@ pub fn render_month(
         output.push_str("\n");
     }
 
+    let columns = render_calendar_columns(events, first_day, days_in_month, term_width);
+    if !columns.is_empty() {
+        output.push('\n');
+        output.push_str(&columns);
+    }
+
     if !agenda && !details {
         return output;
     }
 
     output.push_str(&render_day_listing(events, first_day, days_in_month, details));
     output
+}
+
+/// Default visible width of one calendar column in the month view's event
+/// listing, and the number of spaces placed between adjacent columns. When
+/// every calendar fits on a single row the columns are widened to use the
+/// available terminal width instead.
+const CALENDAR_COL_WIDTH: usize = 45;
+const CALENDAR_COL_GAP: usize = 3;
+
+/// Render the per-calendar event listing shown under the month grid. Events
+/// are grouped into one column per calendar; as many columns as fit within
+/// `term_width` are laid out side by side and the remaining calendars wrap
+/// onto further rows. Every column is headed by its calendar name (colored
+/// with that calendar's accent color) followed by a rule, then one
+/// `Mon DD HH:MM summary` line per event, with the summary in the calendar
+/// color. Returns an empty string when the month has no events.
+fn render_calendar_columns(
+    events: &[ColoredEvent],
+    first_day: NaiveDate,
+    last_day: NaiveDate,
+    term_width: usize,
+) -> String {
+    // Group events by calendar name, keeping a stable alphabetical order. The
+    // column accent color comes from the first event of each group.
+    let mut groups: std::collections::BTreeMap<String, (Option<String>, Vec<&ColoredEvent>)> =
+        std::collections::BTreeMap::new();
+    for event in events {
+        let Some(day) = event_date(&event.event) else {
+            continue;
+        };
+        if day < first_day || day > last_day {
+            continue;
+        }
+        let name = event
+            .calendar
+            .clone()
+            .unwrap_or_else(|| "Local".to_string());
+        let group = groups
+            .entry(name)
+            .or_insert_with(|| (event.color.clone(), Vec::new()));
+        group.1.push(event);
+    }
+    if groups.is_empty() {
+        return String::new();
+    }
+
+    // How many columns fit side by side at the default width, and how wide a
+    // column should actually be: when no wrapping is needed, spread the
+    // columns across the full terminal width.
+    let num_columns = groups.len();
+    let per_row = std::cmp::max(
+        1,
+        (term_width + CALENDAR_COL_GAP) / (CALENDAR_COL_WIDTH + CALENDAR_COL_GAP),
+    );
+    let col_width = if num_columns <= per_row {
+        let gaps = CALENDAR_COL_GAP * num_columns.saturating_sub(1);
+        std::cmp::max(CALENDAR_COL_WIDTH, term_width.saturating_sub(gaps) / num_columns)
+    } else {
+        CALENDAR_COL_WIDTH
+    };
+
+    let mut columns: Vec<Vec<String>> = Vec::new();
+    for (name, (color, mut evs)) in groups {
+        evs.sort_by(|a, b| a.dtstart.cmp(&b.dtstart));
+        let header = colorize(&truncate_plain(&sanitize(&name), col_width), color.as_deref());
+        let mut column = vec![header, "-".repeat(col_width)];
+        for event in evs {
+            let prefix = month_event_prefix(&event.event);
+            let avail = col_width.saturating_sub(prefix.chars().count() + 1);
+            let summary = truncate_plain(&sanitize(&event.summary), avail);
+            column.push(format!(
+                "{} {}",
+                prefix,
+                colorize(&summary, event.color.as_deref())
+            ));
+        }
+        columns.push(column);
+    }
+
+    let mut output = String::new();
+    for chunk in columns.chunks(per_row) {
+        let height = chunk.iter().map(Vec::len).max().unwrap_or(0);
+        for line_idx in 0..height {
+            let mut line = String::new();
+            for (i, column) in chunk.iter().enumerate() {
+                if i > 0 {
+                    line.push_str(&" ".repeat(CALENDAR_COL_GAP));
+                }
+                let content = column.get(line_idx).map(String::as_str).unwrap_or("");
+                line.push_str(&pad_to_width(content, col_width));
+            }
+            output.push_str(line.trim_end());
+            output.push('\n');
+        }
+        output.push('\n');
+    }
+
+    output
+}
+
+/// The `Mon DD HH:MM` prefix for one line of the month view's event columns.
+/// All-day events show `all-day` where the clock time would be.
+fn month_event_prefix(event: &CalendarEvent) -> String {
+    let date_str = match event_date(event) {
+        Some(date) => date.format("%b %e").to_string(),
+        None => "       ".to_string(),
+    };
+    let time_str = if event.all_day {
+        "all-day".to_string()
+    } else if let Some(start) = event.dtstart {
+        start.with_timezone(&Local).format("%H:%M").to_string()
+    } else {
+        "--:--".to_string()
+    };
+    format!("{} {}", date_str, time_str)
+}
+
+/// Truncate plain (ANSI-free) text to at most `max` characters, marking the
+/// cut with an ellipsis. Used before colorizing so escape sequences never
+/// count toward the limit.
+fn truncate_plain(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    if max == 1 {
+        return "…".to_string();
+    }
+    let mut out: String = text.chars().take(max - 1).collect();
+    out.push('…');
+    out
 }
 
 /// Format a single cell in the month view. Each event marker dot is colored
@@ -801,6 +947,7 @@ mod tests {
             .map(|event| ColoredEvent {
                 event,
                 color: color.map(String::from),
+                calendar: None,
             })
             .collect()
     }
@@ -1096,10 +1243,12 @@ mod tests {
         let standup = ColoredEvent {
             event: local_event("Standup", start, end1),
             color: Some("#e6194b".to_string()),
+            calendar: None,
         };
         let sync = ColoredEvent {
             event: local_event("Sync", start, end2),
             color: Some("#4363d8".to_string()),
+            calendar: None,
         };
 
         let output = render_week(&[sync, standup], monday, false, false);
@@ -1146,7 +1295,7 @@ mod tests {
         let end = start + chrono::Duration::hours(1);
         let events = vec![local_event("Meeting", start, end)];
 
-        let output = render_month(&colored(events, None), month, false, false);
+        let output = render_month(&colored(events, None), month, false, false, 80);
         assert!(output.contains("January"));
         assert!(output.contains("2024"));
     }
@@ -1161,18 +1310,20 @@ mod tests {
         event.location = Some("Auditorium".to_string());
         let events = vec![event];
 
-        // Grid-only month view shows no summaries at all.
-        let grid = render_month(&colored(events.clone(), None), month, false, false);
-        assert!(!grid.contains("Sprint Review"));
+        // Every month view lists events beneath the grid, grouped under their
+        // calendar name.
+        let grid = render_month(&colored(events.clone(), None), month, false, false, 80);
+        assert!(grid.contains("Sprint Review"));
+        assert!(grid.contains("Local"));
 
         // Agenda mode appends one compact time + summary line per event.
-        let agenda = render_month(&colored(events.clone(), None), month, true, false);
+        let agenda = render_month(&colored(events.clone(), None), month, true, false, 80);
         assert!(agenda.contains("Sprint Review"));
         assert!(agenda.contains("at Auditorium"));
         assert!(!agenda.contains("Demo features"));
 
         // Details mode expands every event with its full fields.
-        let details = render_month(&colored(events, None), month, false, true);
+        let details = render_month(&colored(events, None), month, false, true, 80);
         assert!(details.contains("Sprint Review"));
         assert!(details.contains("  Location:     Auditorium"));
         assert!(details.contains("Demo features"));
@@ -1336,8 +1487,95 @@ mod tests {
         let end = start + chrono::Duration::hours(1);
         let events = vec![local_event("Meeting", start, end)];
 
-        let output = render_month(&colored(events.clone(), Some("#ff8800")), month, false, false);
+        let output =
+            render_month(&colored(events.clone(), Some("#ff8800")), month, false, false, 80);
         assert!(output.contains("\x1b[38;2;255;136;0m●\x1b[0m"));
-        assert!(!render_month(&colored(events, None), month, false, false).contains('\x1b'));
+        assert!(!render_month(&colored(events, None), month, false, false, 80).contains('\x1b'));
+    }
+
+    /// An event tagged with a calendar name, for the month column grouping.
+    fn named_event(
+        summary: &str,
+        calendar: &str,
+        start: DateTime<Local>,
+        color: Option<&str>,
+    ) -> ColoredEvent {
+        ColoredEvent {
+            event: local_event(summary, start, start + chrono::Duration::hours(1)),
+            color: color.map(String::from),
+            calendar: Some(calendar.to_string()),
+        }
+    }
+
+    #[test]
+    fn test_render_month_lists_events_per_calendar() {
+        let month = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let work_start = Local.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).single().unwrap();
+        let personal_start = Local.with_ymd_and_hms(2024, 1, 16, 18, 0, 0).single().unwrap();
+        let events = vec![
+            named_event("Meeting", "Work", work_start, None),
+            named_event("Gym", "Personal", personal_start, None),
+        ];
+
+        let output = render_month(&events, month, false, false, 100);
+        // Each event is listed with its date, time, and summary.
+        assert!(output.contains("Jan 15 09:00 Meeting"), "{output}");
+        assert!(output.contains("Jan 16 18:00 Gym"), "{output}");
+        // Each calendar has a header, and two columns fit on one row.
+        assert!(
+            output.lines().any(|l| l.contains("Work") && l.contains("Personal")),
+            "expected both calendar headers side by side:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_render_month_wraps_calendars_to_next_row() {
+        let month = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let work_start = Local.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).single().unwrap();
+        let personal_start = Local.with_ymd_and_hms(2024, 1, 16, 18, 0, 0).single().unwrap();
+        let events = vec![
+            named_event("Meeting", "Work", work_start, None),
+            named_event("Gym", "Personal", personal_start, None),
+        ];
+
+        // Too narrow for two 30-wide columns, so the calendars wrap onto
+        // separate rows and their headers never share a line.
+        let output = render_month(&events, month, false, false, 30);
+        assert!(
+            !output.lines().any(|l| l.contains("Work") && l.contains("Personal")),
+            "expected calendars on separate rows:\n{output}"
+        );
+        assert!(output.contains("Meeting"));
+        assert!(output.contains("Gym"));
+    }
+
+    #[test]
+    fn test_render_month_columns_color_headers_and_summaries() {
+        let month = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let start = Local.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).single().unwrap();
+        let events = vec![named_event("Meeting", "Work", start, Some("#ff8800"))];
+
+        let output = render_month(&events, month, false, false, 80);
+        assert!(output.contains("\x1b[38;2;255;136;0mWork\x1b[0m"));
+        assert!(output.contains("\x1b[38;2;255;136;0mMeeting\x1b[0m"));
+
+        // Without a color the listing stays free of escape sequences.
+        let plain = vec![named_event("Meeting", "Work", start, None)];
+        assert!(!render_month(&plain, month, false, false, 80).contains('\x1b'));
+    }
+
+    #[test]
+    fn test_render_month_single_calendar_uses_terminal_width() {
+        let month = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let start = Local.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).single().unwrap();
+        // This summary is longer than the default 45-char column but fits
+        // once the lone column expands to the terminal width.
+        let summary = "Enterprise Architecture Design Review";
+        let events = vec![named_event(summary, "Work", start, None)];
+
+        let output = render_month(&events, month, false, false, 80);
+        assert!(output.contains(&"-".repeat(80)), "{output}");
+        assert!(output.contains(summary), "{output}");
+        assert!(!output.contains('…'), "{output}");
     }
 }

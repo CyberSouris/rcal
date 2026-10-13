@@ -85,6 +85,8 @@ pub struct SyncSummary {
 
 /// Resolve the server password using, in order:
 /// `password_command`, the `RCAL_PASSWORD` env var, then an interactive prompt.
+static RCAL_PASSWORD: &str = "RCAL_PASSWORD";
+
 pub fn resolve_password(server: &ServerConfig) -> Result<String> {
     if let Some(cmd) = &server.password_command {
         let output = std::process::Command::new("sh")
@@ -107,7 +109,7 @@ pub fn resolve_password(server: &ServerConfig) -> Result<String> {
         eprintln!("Warning: password_command produced empty output");
     }
 
-    if let Ok(pw) = std::env::var("RCAL_PASSWORD") {
+    if let Ok(pw) = std::env::var(RCAL_PASSWORD) {
         if !pw.is_empty() {
             return Ok(pw);
         }
@@ -120,7 +122,6 @@ pub fn resolve_password(server: &ServerConfig) -> Result<String> {
     let password = rpassword::read_password().context("Failed to read password")?;
     Ok(password)
 }
-
 /// Refuse to send credentials to remote hosts over plaintext HTTP.
 /// Loopback addresses (used for local servers and testing) are allowed.
 fn validate_scheme(base_url: &str) -> Result<()> {
@@ -777,7 +778,7 @@ fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {
-        let end = s.char_indices().nth(max).map(|(i, _)| i).unwrap_or(s.len());
+        let end = s.char_indices().nth(max).map(|(i, _)| i).unwrap_or_else(|| s.len());
         format!("{}...", &s[..end])
     }
 }

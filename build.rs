@@ -28,6 +28,9 @@ fn is_semver(version: &str) -> bool {
         .unwrap_or(false)
 }
 
+static RCAL_VERSION: &str = "RCAL_VERSION";
+static CARGO_PKG_VERSION: &str = "CARGO_PKG_VERSION";
+
 fn main() {
     // Re-run when the release pipeline injects an exact version.
     println!("cargo:rerun-if-env-changed=RCAL_VERSION");
@@ -36,11 +39,11 @@ fn main() {
     // semver); otherwise fall back to `git describe` (last tagged version,
     // plus the number of commits since and a dirty marker), then to Cargo's
     // version when git is unavailable or describe output is a bare hash.
-    let version = env::var("RCAL_VERSION")
+    let version = env::var(RCAL_VERSION)
         .ok()
         .filter(|v| !v.trim().is_empty())
         .or_else(|| git_describe().filter(|v| is_semver(v)))
-        .unwrap_or_else(|| env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into()));
+        .unwrap_or_else(|| env::var(CARGO_PKG_VERSION).unwrap_or_else(|_| "0.0.0".into()));
 
     println!("cargo:rustc-env=RCAL_BUILD_VERSION={version}");
 }
