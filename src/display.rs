@@ -334,7 +334,7 @@ pub fn render_week(
         // Strictly timewise: a later clock always lands below every earlier
         // clock, plus per-day spacing for events that do not follow each
         // other on the same day.
-        let mut min_row = previous_row.map(|r| r + 1).unwrap_or(0);
+        let mut min_row = previous_row.map_or(0, |r| r + 1);
         for (idx, p) in placed.iter().enumerate() {
             if clock_of[idx] != Some(clock) {
                 continue;
@@ -436,7 +436,7 @@ pub fn render_week(
                 if d > 0 {
                     line.push('|');
                 }
-                let cell_line = cell_lines.get(l).map(String::as_str).unwrap_or("");
+                let cell_line = cell_lines.get(l).map_or("", String::as_str);
                 let cell = if cell_line.trim().is_empty() {
                     " ".repeat(COL_WIDTH)
                 } else {
@@ -648,7 +648,7 @@ pub fn render_month(
         let cell = format_cell(
             day_number,
             is_today,
-            events_by_day.get(&day_number).map(Vec::as_slice).unwrap_or(&[]),
+            events_by_day.get(&day_number).map_or(&[], Vec::as_slice),
         );
         row.push_str(&cell);
     }
@@ -761,7 +761,7 @@ fn render_calendar_columns(
                 if i > 0 {
                     line.push_str(&" ".repeat(CALENDAR_COL_GAP));
                 }
-                let content = column.get(line_idx).map(String::as_str).unwrap_or("");
+                let content = column.get(line_idx).map_or("", String::as_str);
                 line.push_str(&pad_to_width(content, col_width));
             }
             output.push_str(line.trim_end());

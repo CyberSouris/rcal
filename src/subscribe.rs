@@ -160,7 +160,7 @@ fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {
-        let end = s.char_indices().nth(max).map(|(i, _)| i).unwrap_or_else(|| s.len());
+        let end = s.char_indices().nth(max).map_or_else(|| s.len(), |(i, _)| i);
         format!("{}...", &s[..end])
     }
 }

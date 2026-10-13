@@ -24,8 +24,7 @@ fn is_semver(version: &str) -> bool {
     version
         .split(['.', '-'])
         .next()
-        .map(|major| major.bytes().all(|b| b.is_ascii_digit()))
-        .unwrap_or(false)
+        .map_or(false, |major| major.bytes().all(|b| b.is_ascii_digit()))
 }
 
 static RCAL_VERSION: &str = "RCAL_VERSION";

@@ -1185,7 +1185,7 @@ fn select_event_for_delete(
                 return false;
             };
             let local = dtstart.with_timezone(&Local);
-            local.date_naive() == date && time.map(|t| local.time() == t).unwrap_or(true)
+            local.date_naive() == date && time.map_or(true, |t| local.time() == t)
         })
         .collect();
 

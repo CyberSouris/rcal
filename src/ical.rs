@@ -484,8 +484,8 @@ fn parse_hms_offset(s: &str) -> Option<i32> {
     }
     let parts: Vec<&str> = s.split(':').collect();
     let hours: i32 = parts.first()?.parse().ok()?;
-    let minutes: i32 = parts.get(1).map(|p| p.parse().ok().unwrap_or(0)).unwrap_or(0);
-    let seconds: i32 = parts.get(2).map(|p| p.parse().ok().unwrap_or(0)).unwrap_or(0);
+    let minutes: i32 = parts.get(1).map_or(0, |p| p.parse().ok().unwrap_or(0));
+    let seconds: i32 = parts.get(2).map_or(0, |p| p.parse().ok().unwrap_or(0));
     Some(hours * 3600 + minutes * 60 + seconds)
 }
 
@@ -645,8 +645,7 @@ fn fold_line(line: &str) -> String {
         let take = remaining
             .char_indices()
             .nth(75)
-            .map(|(i, _)| i)
-            .unwrap_or_else(|| remaining.len());
+            .map_or_else(|| remaining.len(), |(i, _)| i);
         let chunk = &remaining[..take];
         if first {
             result.push_str(chunk);
