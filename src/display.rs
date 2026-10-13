@@ -238,7 +238,7 @@ fn format_week_header(monday: NaiveDate, sunday: NaiveDate) -> String {
         monday.format("%b %e"),
         sunday.format("%b %e, %Y")
     );
-    let mut header = String::new();
+    let mut header = String::default();
     header.push_str(&format!("{}\n", title));
     header.push_str(&"=".repeat(title.len()));
     header.push_str("\n\n");
