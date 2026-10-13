@@ -164,11 +164,11 @@ pub fn render_day_details(events: &[ColoredEvent], date: NaiveDate) -> String {
 
     for (i, event) in day_events.iter().enumerate() {
         if i > 0 {
-            output.push_str("\n");
+            output.push('\n');
         }
         output.push_str(&render_event_details(&event.event, event.color.as_deref()));
     }
-    output.push_str("\n");
+    output.push('\n');
 
     output
 }
@@ -484,13 +484,13 @@ fn render_day_listing(
             };
             output.push_str(&format!("\n{}\n", day_label));
             output.push_str(&"-".repeat(day_label.len()));
-            output.push_str("\n");
+            output.push('\n');
 
             day_events.sort_by(|a, b| a.dtstart.cmp(&b.dtstart));
             if details {
                 for (i, event) in day_events.iter().enumerate() {
                     if i > 0 {
-                        output.push_str("\n");
+                        output.push('\n');
                     }
                     output.push_str(&render_event_details(&event.event, event.color.as_deref()));
                 }
@@ -658,7 +658,7 @@ pub fn render_month(
 
     for row in week_rows {
         output.push_str(&row.trim_end());
-        output.push_str("\n");
+        output.push('\n');
     }
 
     let columns = render_calendar_columns(events, first_day, days_in_month, term_width);
