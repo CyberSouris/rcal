@@ -178,7 +178,7 @@ fn parse_event(
         match property.name.as_str() {
             "UID" => {
                 if let Some(value) = &property.value {
-                    uid = value.clone();
+                    uid.clone_from(value);
                 }
             }
             "SUMMARY" => {
@@ -194,7 +194,7 @@ fn parse_event(
             }
             "URL" | "X-MICROSOFT-SKYPETEAMSMEETINGURL" | "X-GOOGLE-CONFERENCE" => {
                 if url.is_none() {
-                    url = property.value.clone();
+                    url.clone_from(&property.value);
                 }
             }
             "DTSTART" => {
@@ -209,10 +209,10 @@ fn parse_event(
                 }
             }
             "STATUS" => {
-                status = property.value.clone();
+                status.clone_from(&property.value);
             }
             "RRULE" => {
-                recurrence = property.value.clone();
+                recurrence.clone_from(&property.value);
             }
             _ => {}
         }
