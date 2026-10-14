@@ -815,6 +815,170 @@ fn resolve_target_calendar(
     }
 }
 
+/// Resolve the title for a new event from the flag or an interactive prompt.
+fn resolve_event_title(title_flag: Option<String>, interactive: bool) -> anyhow::Result<String> {
+    match title_flag {
+        Some(t) if !t.trim().is_empty() => Ok(t),
+        Some(_) => anyhow::bail!("Title cannot be empty"),
+        None if interactive => {
+            prompt("Title", None)?.ok_or_else(|| anyhow::anyhow!("Title is required"))
+        }
+        None => anyhow::bail!("Missing required --title"),
+    }
+}
+
+/// Resolve the date for a new event from the flag or an interactive prompt,
+/// defaulting to today.
+fn resolve_event_date(date_flag: Option<String>, interactive: bool) -> anyhow::Result<NaiveDate> {
+    match date_flag {
+        Some(d) => parse_date(&d),
+        None => {
+            let default = Local::now().format("%Y-%m-%d").to_string();
+            if interactive {
+                let input = prompt("Date", Some(&default))?.unwrap_or(default);
+                parse_date(&input)
+            } else {
+                parse_date(&default)
+            }
+        }
+    }
+}
+
+/// Decide whether a new event is all-day, from the flags or an interactive
+/// prompt.
+fn resolve_all_day(
+    all_day_flag: bool,
+    time_flag: &Option<String>,
+    interactive: bool,
+) -> anyhow::Result<bool> {
+    if all_day_flag {
+        Ok(true)
+    } else if time_flag.is_some() {
+        Ok(false)
+    } else if interactive {
+        Ok(matches!(
+            prompt("All day? [y/N]", Some("n"))?
+                .unwrap_or_else(|| "n".to_string())
+                .to_lowercase()
+                .as_str(),
+            "y" | "yes"
+        ))
+    } else {
+        Ok(false)
+    }
+}
+
+/// Resolve the start time for a timed event from the flag or an interactive
+/// prompt, defaulting to 09:00.
+fn resolve_event_time(time_flag: Option<String>, interactive: bool) -> anyhow::Result<NaiveTime> {
+    match time_flag {
+        Some(t) => parse_time(&t),
+        None => {
+            let input = if interactive {
+                prompt("Start time (HH:MM)", Some("09:00"))?
+                    .unwrap_or_else(|| "09:00".to_string())
+            } else {
+                "09:00".to_string()
+            };
+            parse_time(&input)
+        }
+    }
+}
+
+/// Resolve the duration for a timed event from the flag or an interactive
+/// prompt, defaulting to 60 minutes.
+fn resolve_event_duration(
+    duration_flag: Option<u32>,
+    interactive: bool,
+) -> anyhow::Result<chrono::Duration> {
+    match duration_flag {
+        Some(d) => Ok(chrono::Duration::minutes(d as i64)),
+        None => {
+            let input = if interactive {
+                prompt("Duration (minutes)", Some("60"))?
+                    .unwrap_or_else(|| "60".to_string())
+            } else {
+                "60".to_string()
+            };
+            let mins: i64 = input
+                .trim()
+                .parse()
+                .map_err(|_| anyhow::anyhow!("Invalid duration: {}", input))?;
+            Ok(chrono::Duration::minutes(mins))
+        }
+    }
+}
+
+/// Resolve the start/end timestamps for a new event from the flags or
+/// interactive prompts.
+fn resolve_event_times(
+    date: NaiveDate,
+    all_day: bool,
+    time_flag: Option<String>,
+    duration_flag: Option<u32>,
+    interactive: bool,
+) -> anyhow::Result<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> {
+    if all_day {
+        let start = date.and_hms_opt(0, 0, 0).unwrap();
+        let end = start + chrono::Duration::days(1);
+        return Ok((
+            chrono::TimeZone::from_utc_datetime(&chrono::Utc, &start),
+            chrono::TimeZone::from_utc_datetime(&chrono::Utc, &end),
+        ));
+    }
+
+    let time = resolve_event_time(time_flag, interactive)?;
+    let duration = resolve_event_duration(duration_flag, interactive)?;
+    let start = date.and_time(time);
+    let end = start + duration;
+    Ok((naive_local_to_utc(start), naive_local_to_utc(end)))
+}
+
+/// Resolve an optional text field (location, description, ...) from a flag or
+/// an interactive prompt.
+fn resolve_optional_field(
+    flag: Option<String>,
+    label: &str,
+    interactive: bool,
+) -> anyhow::Result<Option<String>> {
+    match flag {
+        Some(v) => Ok(Some(v)),
+        None if interactive => prompt(label, None),
+        None => Ok(None),
+    }
+}
+
+/// Print a one-line preview of a new event, preceded by its calendar color
+/// swatch.
+fn print_event_preview(
+    event: &ical::CalendarEvent,
+    calendar_id: &Option<String>,
+    calendars: &[db::Calendar],
+    config: Option<&config::Config>,
+) {
+    let color = calendar_id.as_deref().and_then(|id| {
+        calendars
+            .iter()
+            .find(|c| c.id == *id)
+            .and_then(|c| config.and_then(|cfg| cfg.calendar_color_for(&c.name)))
+    });
+    println!();
+    println!(
+        "{} {} ({})",
+        color_swatch(color),
+        display::sanitize(&event.summary),
+        format_event_time(event)
+    );
+}
+
+/// Prompt for confirmation before adding an event; `true` means confirmed.
+fn confirm_event() -> anyhow::Result<bool> {
+    let confirm = prompt("Add event? [y/N]", Some("n"))?
+        .unwrap_or_else(|| "n".to_string())
+        .to_lowercase();
+    Ok(matches!(confirm.as_str(), "y" | "yes"))
+}
+
 /// Handle the `new` command: build an event from flags or interactive prompts
 #[allow(clippy::too_many_arguments)]
 fn handle_new(
@@ -839,97 +1003,13 @@ fn handle_new(
         resolve_target_calendar(&calendars, calendar_flag, interactive, config.as_ref())?;
 
     // --- Get field values (flag, prompt, or default) ---
-    let title = match title_flag {
-        Some(t) if !t.trim().is_empty() => t,
-        Some(_) => anyhow::bail!("Title cannot be empty"),
-        None if interactive => prompt("Title", None)?
-            .ok_or_else(|| anyhow::anyhow!("Title is required"))?,
-        None => anyhow::bail!("Missing required --title"),
-    };
-
-    let date = match date_flag {
-        Some(d) => parse_date(&d)?,
-        None => {
-            let default = Local::now().format("%Y-%m-%d").to_string();
-            if interactive {
-                let input = prompt("Date", Some(&default))?.unwrap_or(default);
-                parse_date(&input)?
-            } else {
-                parse_date(&default)?
-            }
-        }
-    };
-
-    let all_day = if all_day_flag {
-        true
-    } else if time_flag.is_some() {
-        false
-    } else if interactive {
-        matches!(
-            prompt("All day? [y/N]", Some("n"))?
-                .unwrap_or_else(|| "n".to_string())
-                .to_lowercase()
-                .as_str(),
-            "y" | "yes"
-        )
-    } else {
-        false
-    };
-
-    let (dtstart, dtend) = if all_day {
-        let start = date.and_hms_opt(0, 0, 0).unwrap();
-        let end = start + chrono::Duration::days(1);
-        (
-            chrono::TimeZone::from_utc_datetime(&chrono::Utc, &start),
-            chrono::TimeZone::from_utc_datetime(&chrono::Utc, &end),
-        )
-    } else {
-        let time = match time_flag {
-            Some(t) => parse_time(&t)?,
-            None => {
-                let input = if interactive {
-                    prompt("Start time (HH:MM)", Some("09:00"))?
-                        .unwrap_or_else(|| "09:00".to_string())
-                } else {
-                    "09:00".to_string()
-                };
-                parse_time(&input)?
-            }
-        };
-
-        let duration = match duration_flag {
-            Some(d) => chrono::Duration::minutes(d as i64),
-            None => {
-                let input = if interactive {
-                    prompt("Duration (minutes)", Some("60"))?
-                        .unwrap_or_else(|| "60".to_string())
-                } else {
-                    "60".to_string()
-                };
-                let mins: i64 = input
-                    .trim()
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid duration: {}", input))?;
-                chrono::Duration::minutes(mins)
-            }
-        };
-
-        let start = date.and_time(time);
-        let end = start + duration;
-        (naive_local_to_utc(start), naive_local_to_utc(end))
-    };
-
-    let location = match location_flag {
-        Some(l) => Some(l),
-        None if interactive => prompt("Location", None)?,
-        None => None,
-    };
-
-    let description = match description_flag {
-        Some(d) => Some(d),
-        None if interactive => prompt("Description", None)?,
-        None => None,
-    };
+    let title = resolve_event_title(title_flag, interactive)?;
+    let date = resolve_event_date(date_flag, interactive)?;
+    let all_day = resolve_all_day(all_day_flag, &time_flag, interactive)?;
+    let (dtstart, dtend) =
+        resolve_event_times(date, all_day, time_flag, duration_flag, interactive)?;
+    let location = resolve_optional_field(location_flag, "Location", interactive)?;
+    let description = resolve_optional_field(description_flag, "Description", interactive)?;
 
     let event = ical::CalendarEvent {
         uid: uuid::Uuid::new_v4().to_string(),
@@ -944,32 +1024,11 @@ fn handle_new(
         recurrence: None,
     };
 
-    println!();
-    let color = calendar_id.as_deref().and_then(|id| {
-        calendars
-            .iter()
-            .find(|c| c.id == *id)
-            .and_then(|c| {
-                config
-                    .as_ref()
-                    .and_then(|cfg| cfg.calendar_color_for(&c.name))
-            })
-    });
-    println!(
-        "{} {} ({})",
-        color_swatch(color),
-        display::sanitize(&event.summary),
-        format_event_time(&event)
-    );
+    print_event_preview(&event, &calendar_id, &calendars, config.as_ref());
 
-    if interactive {
-        let confirm = prompt("Add event? [y/N]", Some("n"))?
-            .unwrap_or_else(|| "n".to_string())
-            .to_lowercase();
-        if !matches!(confirm.as_str(), "y" | "yes") {
-            println!("Cancelled.");
-            return Ok(());
-        }
+    if interactive && !confirm_event()? {
+        println!("Cancelled.");
+        return Ok(());
     }
 
     db.insert_event(&event, calendar_id.as_deref(), None, None)?;
