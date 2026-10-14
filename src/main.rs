@@ -641,12 +641,6 @@ fn handle_import(file: &std::path::Path, add: bool, dry_run: bool) -> anyhow::Re
             .as_ref()
             .map(|s| format!(" [{}]", display::sanitize(s)))
             .unwrap_or_default();
-        // ... rest of event processing logic ...
-    }
-
-    Ok(())
-}
-            .unwrap_or_default();
 
         let location_str = event
             .location
@@ -757,17 +751,67 @@ fn color_swatch(hex: Option<&str>) -> String {
 fn resolve_target_calendar(
     calendars: &[db::Calendar],
     calendar_flag: Option<String>,
+    interactive: bool,
+    config: Option<&config::Config>,
 ) -> anyhow::Result<Option<String>> {
     match calendar_flag {
         Some(sel) => {
             if let Some(c) = calendars.iter().find(|c| c.id == sel || c.name == sel) {
                 Ok(Some(c.id.clone()))
             } else {
-                eprintln!("Unknown calendar: {}", sel);
-                std::process::exit(1);
+                println!("Available calendars:");
+                for c in calendars {
+                    println!(
+                        "  - {} ({})",
+                        display::sanitize(&c.name),
+                        display::sanitize(&c.id)
+                    );
+                }
+                anyhow::bail!(
+                    "Unknown calendar '{}'. Pass one of the names/URLs above with --calendar.",
+                    sel
+                );
             }
         }
-        None => Ok(None),
+        None => {
+            if calendars.is_empty() {
+                println!(
+                    "No calendars configured; event will be stored without a calendar.\n\
+                     Use 'rcal sync' to pull calendars from a CalDAV server."
+                );
+                Ok(None)
+            } else if interactive {
+                println!("Select a calendar:");
+                for (i, c) in calendars.iter().enumerate() {
+                    let color = config.and_then(|cfg| cfg.calendar_color_for(&c.name));
+                    println!(
+                        "  {}. {} {}",
+                        i + 1,
+                        color_swatch(color),
+                        display::sanitize(&c.name)
+                    );
+                }
+                let choice = prompt(
+                    &format!("Calendar [1-{}]", calendars.len()),
+                    Some(&calendars[0].name),
+                )?;
+                let selected = choice.unwrap_or_else(|| calendars[0].name.clone());
+                let idx = if let Ok(n) = selected.parse::<usize>() {
+                    n.checked_sub(1)
+                        .filter(|i| *i < calendars.len())
+                        .unwrap_or(0)
+                } else if let Some(pos) = calendars.iter().position(|c| c.name == selected) {
+                    pos
+                } else {
+                    println!("Unknown calendar '{}', using first.", selected);
+                    0
+                };
+                Ok(Some(calendars[idx].id.clone()))
+            } else {
+                // Non-interactive: default to the first configured calendar
+                Ok(Some(calendars[0].id.clone()))
+            }
+        }
     }
 }
 
@@ -791,61 +835,8 @@ fn handle_new(
     let interactive = std::io::stdin().is_terminal();
 
     // --- Resolve target calendar ---
-    let calendar_id = resolve_target_calendar(&calendars, calendar_flag)?;
-                None => {
-                    println!("Available calendars:");
-                    for c in &calendars {
-                        println!("  - {} ({})", display::sanitize(&c.name), display::sanitize(&c.id));
-                    }
-                    anyhow::bail!(
-                        "Unknown calendar '{}'. Pass one of the names/URLs above with --calendar.",
-                        sel
-                    );
-                }
-            }
-        }
-        None => {
-            if calendars.is_empty() {
-                println!(
-                    "No calendars configured; event will be stored without a calendar.\n\
-                     Use 'rcal sync' to pull calendars from a CalDAV server."
-                );
-                None
-            } else if interactive {
-                println!("Select a calendar:");
-                for (i, c) in calendars.iter().enumerate() {
-                    let color = config
-                        .as_ref()
-                        .and_then(|cfg| cfg.calendar_color_for(&c.name));
-                    println!(
-                        "  {}. {} {}",
-                        i + 1,
-                        color_swatch(color),
-                        display::sanitize(&c.name)
-                    );
-                }
-                let choice = prompt(
-                    &format!("Calendar [1-{}]", calendars.len()),
-                    Some(&calendars[0].name),
-                )?;
-                let selected = choice.unwrap_or_else(|| calendars[0].name.clone());
-                let idx = if let Ok(n) = selected.parse::<usize>() {
-                    n.checked_sub(1)
-                        .filter(|i| *i < calendars.len())
-                        .unwrap_or(0)
-                } else if let Some(pos) = calendars.iter().position(|c| c.name == selected) {
-                    pos
-                } else {
-                    println!("Unknown calendar '{}', using first.", selected);
-                    0
-                };
-                Some(calendars[idx].id.clone())
-            } else {
-                // Non-interactive: default to the first configured calendar
-                Some(calendars[0].id.clone())
-            }
-        }
-    };
+    let calendar_id =
+        resolve_target_calendar(&calendars, calendar_flag, interactive, config.as_ref())?;
 
     // --- Get field values (flag, prompt, or default) ---
     let title = match title_flag {
