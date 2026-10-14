@@ -608,6 +608,16 @@ fn parse_show_arg(s: &str) -> anyhow::Result<(NaiveDate, Option<NaiveTime>)> {
     }
 }
 
+/// Display the initial summary of the parsed calendar
+fn display_initial_summary(calendar: &ical::Calendar) {
+    println!(
+        "Parsed calendar: {}",
+        display::sanitize(calendar.name.as_deref().unwrap_or("Unknown"))
+    );
+    println!("Found {} events:", calendar.events.len());
+    println!();
+}
+
 /// Handle the import command: parse, check duplicates/conflicts, add to database
 fn handle_import(file: &std::path::Path, add: bool, dry_run: bool) -> anyhow::Result<()> {
     use std::io::IsTerminal;
@@ -621,12 +631,7 @@ fn handle_import(file: &std::path::Path, add: bool, dry_run: bool) -> anyhow::Re
         print!("\x1b[2J\x1b[H");
     }
 
-    println!(
-        "Parsed calendar: {}",
-        display::sanitize(calendar.name.as_deref().unwrap_or("Unknown"))
-    );
-    println!("Found {} events:", calendar.events.len());
-    println!();
+    display_initial_summary(&calendar);
 
     for (i, event) in calendar.events.iter().enumerate() {
         let time_str = format_event_time(event);
@@ -721,7 +726,6 @@ fn handle_import(file: &std::path::Path, add: bool, dry_run: bool) -> anyhow::Re
     println!("\nDone: {} added, {} updated.", added, updated);
     Ok(())
 }
-
 /// Render a colored swatch for a hex calendar color (#RRGGBB)
 fn color_swatch(hex: Option<&str>) -> String {
     match hex {
@@ -744,44 +748,29 @@ fn color_swatch(hex: Option<&str>) -> String {
     }
 }
 
-/// Handle the `new` command: build an event from flags or interactive prompts
-#[allow(clippy::too_many_arguments)]
-fn handle_new(
-    title_flag: Option<String>,
-    date_flag: Option<String>,
-    time_flag: Option<String>,
-    duration_flag: Option<u32>,
-    all_day_flag: bool,
-    location_flag: Option<String>,
-    description_flag: Option<String>,
+fn resolve_target_calendar(
+    calendars: &[db::Calendar],
     calendar_flag: Option<String>,
-) -> anyhow::Result<()> {
-    use std::io::IsTerminal;
-
-    let db = db::Database::open()?;
-    let calendars = db.get_calendars()?;
-    let config = config::Config::load().ok();
-    let interactive = std::io::stdin().is_terminal();
-
-    // --- Resolve target calendar ---
-    let calendar_id = match calendar_flag {
+    interactive: bool,
+    config: Option<&config::Config>,
+) -> anyhow::Result<Option<String>> {
+    match calendar_flag {
         Some(sel) => {
-            let matched = calendars
-                .iter()
-                .find(|c| c.id == sel || c.name == sel)
-                .map(|c| c.id.clone());
-            match matched {
-                Some(id) => Some(id),
-                None => {
-                    println!("Available calendars:");
-                    for c in &calendars {
-                        println!("  - {} ({})", display::sanitize(&c.name), display::sanitize(&c.id));
-                    }
-                    anyhow::bail!(
-                        "Unknown calendar '{}'. Pass one of the names/URLs above with --calendar.",
-                        sel
+            if let Some(c) = calendars.iter().find(|c| c.id == sel || c.name == sel) {
+                Ok(Some(c.id.clone()))
+            } else {
+                println!("Available calendars:");
+                for c in calendars {
+                    println!(
+                        "  - {} ({})",
+                        display::sanitize(&c.name),
+                        display::sanitize(&c.id)
                     );
                 }
+                anyhow::bail!(
+                    "Unknown calendar '{}'. Pass one of the names/URLs above with --calendar.",
+                    sel
+                );
             }
         }
         None => {
@@ -790,13 +779,11 @@ fn handle_new(
                     "No calendars configured; event will be stored without a calendar.\n\
                      Use 'rcal sync' to pull calendars from a CalDAV server."
                 );
-                None
+                Ok(None)
             } else if interactive {
                 println!("Select a calendar:");
                 for (i, c) in calendars.iter().enumerate() {
-                    let color = config
-                        .as_ref()
-                        .and_then(|cfg| cfg.calendar_color_for(&c.name));
+                    let color = config.and_then(|cfg| cfg.calendar_color_for(&c.name));
                     println!(
                         "  {}. {} {}",
                         i + 1,
@@ -819,106 +806,210 @@ fn handle_new(
                     println!("Unknown calendar '{}', using first.", selected);
                     0
                 };
-                Some(calendars[idx].id.clone())
+                Ok(Some(calendars[idx].id.clone()))
             } else {
                 // Non-interactive: default to the first configured calendar
-                Some(calendars[0].id.clone())
+                Ok(Some(calendars[0].id.clone()))
             }
         }
-    };
+    }
+}
 
-    // --- Get field values (flag, prompt, or default) ---
-    let title = match title_flag {
-        Some(t) if !t.trim().is_empty() => t,
+/// Resolve the title for a new event from the flag or an interactive prompt.
+fn resolve_event_title(title_flag: Option<String>, interactive: bool) -> anyhow::Result<String> {
+    match title_flag {
+        Some(t) if !t.trim().is_empty() => Ok(t),
         Some(_) => anyhow::bail!("Title cannot be empty"),
-        None if interactive => prompt("Title", None)?
-            .ok_or_else(|| anyhow::anyhow!("Title is required"))?,
+        None if interactive => {
+            prompt("Title", None)?.ok_or_else(|| anyhow::anyhow!("Title is required"))
+        }
         None => anyhow::bail!("Missing required --title"),
-    };
+    }
+}
 
-    let date = match date_flag {
-        Some(d) => parse_date(&d)?,
+/// Resolve the date for a new event from the flag or an interactive prompt,
+/// defaulting to today.
+fn resolve_event_date(date_flag: Option<String>, interactive: bool) -> anyhow::Result<NaiveDate> {
+    match date_flag {
+        Some(d) => parse_date(&d),
         None => {
             let default = Local::now().format("%Y-%m-%d").to_string();
             if interactive {
                 let input = prompt("Date", Some(&default))?.unwrap_or(default);
-                parse_date(&input)?
+                parse_date(&input)
             } else {
-                parse_date(&default)?
+                parse_date(&default)
             }
         }
-    };
+    }
+}
 
-    let all_day = if all_day_flag {
-        true
+/// Decide whether a new event is all-day, from the flags or an interactive
+/// prompt.
+fn resolve_all_day(
+    all_day_flag: bool,
+    time_flag: &Option<String>,
+    interactive: bool,
+) -> anyhow::Result<bool> {
+    if all_day_flag {
+        Ok(true)
     } else if time_flag.is_some() {
-        false
+        Ok(false)
     } else if interactive {
-        matches!(
+        Ok(matches!(
             prompt("All day? [y/N]", Some("n"))?
                 .unwrap_or_else(|| "n".to_string())
                 .to_lowercase()
                 .as_str(),
             "y" | "yes"
-        )
+        ))
     } else {
-        false
-    };
+        Ok(false)
+    }
+}
 
-    let (dtstart, dtend) = if all_day {
+/// Resolve the start time for a timed event from the flag or an interactive
+/// prompt, defaulting to 09:00.
+fn resolve_event_time(time_flag: Option<String>, interactive: bool) -> anyhow::Result<NaiveTime> {
+    match time_flag {
+        Some(t) => parse_time(&t),
+        None => {
+            let input = if interactive {
+                prompt("Start time (HH:MM)", Some("09:00"))?
+                    .unwrap_or_else(|| "09:00".to_string())
+            } else {
+                "09:00".to_string()
+            };
+            parse_time(&input)
+        }
+    }
+}
+
+/// Resolve the duration for a timed event from the flag or an interactive
+/// prompt, defaulting to 60 minutes.
+fn resolve_event_duration(
+    duration_flag: Option<u32>,
+    interactive: bool,
+) -> anyhow::Result<chrono::Duration> {
+    match duration_flag {
+        Some(d) => Ok(chrono::Duration::minutes(d as i64)),
+        None => {
+            let input = if interactive {
+                prompt("Duration (minutes)", Some("60"))?
+                    .unwrap_or_else(|| "60".to_string())
+            } else {
+                "60".to_string()
+            };
+            let mins: i64 = input
+                .trim()
+                .parse()
+                .map_err(|_| anyhow::anyhow!("Invalid duration: {}", input))?;
+            Ok(chrono::Duration::minutes(mins))
+        }
+    }
+}
+
+/// Resolve the start/end timestamps for a new event from the flags or
+/// interactive prompts.
+fn resolve_event_times(
+    date: NaiveDate,
+    all_day: bool,
+    time_flag: Option<String>,
+    duration_flag: Option<u32>,
+    interactive: bool,
+) -> anyhow::Result<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> {
+    if all_day {
         let start = date.and_hms_opt(0, 0, 0).unwrap();
         let end = start + chrono::Duration::days(1);
-        (
+        return Ok((
             chrono::TimeZone::from_utc_datetime(&chrono::Utc, &start),
             chrono::TimeZone::from_utc_datetime(&chrono::Utc, &end),
-        )
-    } else {
-        let time = match time_flag {
-            Some(t) => parse_time(&t)?,
-            None => {
-                let input = if interactive {
-                    prompt("Start time (HH:MM)", Some("09:00"))?
-                        .unwrap_or_else(|| "09:00".to_string())
-                } else {
-                    "09:00".to_string()
-                };
-                parse_time(&input)?
-            }
-        };
+        ));
+    }
 
-        let duration = match duration_flag {
-            Some(d) => chrono::Duration::minutes(d as i64),
-            None => {
-                let input = if interactive {
-                    prompt("Duration (minutes)", Some("60"))?
-                        .unwrap_or_else(|| "60".to_string())
-                } else {
-                    "60".to_string()
-                };
-                let mins: i64 = input
-                    .trim()
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid duration: {}", input))?;
-                chrono::Duration::minutes(mins)
-            }
-        };
+    let time = resolve_event_time(time_flag, interactive)?;
+    let duration = resolve_event_duration(duration_flag, interactive)?;
+    let start = date.and_time(time);
+    let end = start + duration;
+    Ok((naive_local_to_utc(start), naive_local_to_utc(end)))
+}
 
-        let start = date.and_time(time);
-        let end = start + duration;
-        (naive_local_to_utc(start), naive_local_to_utc(end))
-    };
+/// Resolve an optional text field (location, description, ...) from a flag or
+/// an interactive prompt.
+fn resolve_optional_field(
+    flag: Option<String>,
+    label: &str,
+    interactive: bool,
+) -> anyhow::Result<Option<String>> {
+    match flag {
+        Some(v) => Ok(Some(v)),
+        None if interactive => prompt(label, None),
+        None => Ok(None),
+    }
+}
 
-    let location = match location_flag {
-        Some(l) => Some(l),
-        None if interactive => prompt("Location", None)?,
-        None => None,
-    };
+/// Print a one-line preview of a new event, preceded by its calendar color
+/// swatch.
+fn print_event_preview(
+    event: &ical::CalendarEvent,
+    calendar_id: &Option<String>,
+    calendars: &[db::Calendar],
+    config: Option<&config::Config>,
+) {
+    let color = calendar_id.as_deref().and_then(|id| {
+        calendars
+            .iter()
+            .find(|c| c.id == *id)
+            .and_then(|c| config.and_then(|cfg| cfg.calendar_color_for(&c.name)))
+    });
+    println!();
+    println!(
+        "{} {} ({})",
+        color_swatch(color),
+        display::sanitize(&event.summary),
+        format_event_time(event)
+    );
+}
 
-    let description = match description_flag {
-        Some(d) => Some(d),
-        None if interactive => prompt("Description", None)?,
-        None => None,
-    };
+/// Prompt for confirmation before adding an event; `true` means confirmed.
+fn confirm_event() -> anyhow::Result<bool> {
+    let confirm = prompt("Add event? [y/N]", Some("n"))?
+        .unwrap_or_else(|| "n".to_string())
+        .to_lowercase();
+    Ok(matches!(confirm.as_str(), "y" | "yes"))
+}
+
+/// Handle the `new` command: build an event from flags or interactive prompts
+#[allow(clippy::too_many_arguments)]
+fn handle_new(
+    title_flag: Option<String>,
+    date_flag: Option<String>,
+    time_flag: Option<String>,
+    duration_flag: Option<u32>,
+    all_day_flag: bool,
+    location_flag: Option<String>,
+    description_flag: Option<String>,
+    calendar_flag: Option<String>,
+) -> anyhow::Result<()> {
+    use std::io::IsTerminal;
+
+    let db = db::Database::open()?;
+    let calendars = db.get_calendars()?;
+    let config = config::Config::load().ok();
+    let interactive = std::io::stdin().is_terminal();
+
+    // --- Resolve target calendar ---
+    let calendar_id =
+        resolve_target_calendar(&calendars, calendar_flag, interactive, config.as_ref())?;
+
+    // --- Get field values (flag, prompt, or default) ---
+    let title = resolve_event_title(title_flag, interactive)?;
+    let date = resolve_event_date(date_flag, interactive)?;
+    let all_day = resolve_all_day(all_day_flag, &time_flag, interactive)?;
+    let (dtstart, dtend) =
+        resolve_event_times(date, all_day, time_flag, duration_flag, interactive)?;
+    let location = resolve_optional_field(location_flag, "Location", interactive)?;
+    let description = resolve_optional_field(description_flag, "Description", interactive)?;
 
     let event = ical::CalendarEvent {
         uid: uuid::Uuid::new_v4().to_string(),
@@ -933,32 +1024,11 @@ fn handle_new(
         recurrence: None,
     };
 
-    println!();
-    let color = calendar_id.as_deref().and_then(|id| {
-        calendars
-            .iter()
-            .find(|c| c.id == *id)
-            .and_then(|c| {
-                config
-                    .as_ref()
-                    .and_then(|cfg| cfg.calendar_color_for(&c.name))
-            })
-    });
-    println!(
-        "{} {} ({})",
-        color_swatch(color),
-        display::sanitize(&event.summary),
-        format_event_time(&event)
-    );
+    print_event_preview(&event, &calendar_id, &calendars, config.as_ref());
 
-    if interactive {
-        let confirm = prompt("Add event? [y/N]", Some("n"))?
-            .unwrap_or_else(|| "n".to_string())
-            .to_lowercase();
-        if !matches!(confirm.as_str(), "y" | "yes") {
-            println!("Cancelled.");
-            return Ok(());
-        }
+    if interactive && !confirm_event()? {
+        println!("Cancelled.");
+        return Ok(());
     }
 
     db.insert_event(&event, calendar_id.as_deref(), None, None)?;
@@ -1238,6 +1308,25 @@ fn delete_ambiguous_message(
     }
 }
 
+fn apply_delete_calendar_filter(
+    stored: &mut Vec<db::StoredEvent>,
+    filter: DeleteCalendarFilter,
+) -> String {
+    match filter {
+        DeleteCalendarFilter::None => String::default(),
+        DeleteCalendarFilter::Local => {
+            stored.retain(|s| s.calendar_id.is_none());
+            " in calendar 'local'".to_string()
+        }
+        DeleteCalendarFilter::Calendar { id, name } => {
+            stored.retain(|s| s.calendar_id.as_deref() == Some(id.as_str()));
+            // Calendar names come from the server's <d:displayname> (or an
+            // ICS feed) and are untrusted; sanitize before any message.
+            format!(" in calendar '{}'", display::sanitize(&name))
+        }
+    }
+}
+
 /// Handle `rcal delete`: remove an event from the local cache and, when it
 /// belongs to a CalDAV calendar, from the server too. Events cached from an
 /// ICS subscription are only removed locally (the feed re-adds them on the
@@ -1253,19 +1342,8 @@ async fn handle_delete(
     let db = db::Database::open()?;
     let mut stored = db.get_stored_events_for_day(date)?;
 
-    let scope = match resolve_delete_calendar(calendar, &db.get_calendars()?)? {
-        DeleteCalendarFilter::None => String::default(),
-        DeleteCalendarFilter::Local => {
-            stored.retain(|s| s.calendar_id.is_none());
-            " in calendar 'local'".to_string()
-        }
-        DeleteCalendarFilter::Calendar { id, name } => {
-            stored.retain(|s| s.calendar_id.as_deref() == Some(id.as_str()));
-            // Calendar names come from the server's <d:displayname> (or an
-            // ICS feed) and are untrusted; sanitize before any message.
-            format!(" in calendar '{}'", display::sanitize(&name))
-        }
-    };
+    let filter = resolve_delete_calendar(calendar, &db.get_calendars()?)?;
+    let scope = apply_delete_calendar_filter(&mut stored, filter);
 
     let index = match select_event_for_delete(&stored, date, time) {
         DeleteSelection::Found(i) => i,
