@@ -484,8 +484,8 @@ fn parse_hms_offset(s: &str) -> Option<i32> {
     }
     let parts: Vec<&str> = s.split(':').collect();
     let hours: i32 = parts.first()?.parse().ok()?;
-    let minutes: i32 = parts.get(1).map_or(0, |p| p.parse().ok().unwrap_or(0));
-    let seconds: i32 = parts.get(2).map_or(0, |p| p.parse().ok().unwrap_or(0));
+    let minutes: i32 = parts.get(1).map_or(0, |p| p.parse().unwrap_or(0));
+    let seconds: i32 = parts.get(2).map_or(0, |p| p.parse().unwrap_or(0));
     Some(hours * 3600 + minutes * 60 + seconds)
 }
 
