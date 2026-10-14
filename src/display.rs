@@ -703,7 +703,7 @@ fn render_calendar_columns(
     // Group events by calendar name, keeping a stable alphabetical order. The
     // column accent color comes from the first event of each group.
     let mut groups: std::collections::BTreeMap<String, (Option<String>, Vec<&ColoredEvent>)> =
-        std::collections::BTreeMap::new();
+        std::collections::BTreeMap::default();
     for event in events {
         let Some(day) = event_date(&event.event) else {
             continue;
@@ -721,7 +721,7 @@ fn render_calendar_columns(
         group.1.push(event);
     }
     if groups.is_empty() {
-        return String::new();
+        return String::default();
     }
 
     // How many columns fit side by side at the default width, and how wide a
@@ -739,7 +739,7 @@ fn render_calendar_columns(
         CALENDAR_COL_WIDTH
     };
 
-    let mut columns: Vec<Vec<String>> = Vec::new();
+    let mut columns: Vec<Vec<String>> = Vec::default();
     for (name, (color, mut evs)) in groups {
         evs.sort_by(|a, b| a.dtstart.cmp(&b.dtstart));
         let header = colorize(&truncate_plain(&sanitize(&name), col_width), color.as_deref());
@@ -757,7 +757,7 @@ fn render_calendar_columns(
         columns.push(column);
     }
 
-    let mut output = String::new();
+    let mut output = String::default();
     for chunk in columns.chunks(per_row) {
         let height = chunk.iter().map(Vec::len).max().unwrap_or(0);
         for line_idx in 0..height {
@@ -803,7 +803,7 @@ fn truncate_plain(text: &str, max: usize) -> String {
         return text.to_string();
     }
     if max == 0 {
-        return String::new();
+        return String::default();
     }
     if max == 1 {
         return "…".to_string();
