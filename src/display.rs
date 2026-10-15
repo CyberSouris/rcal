@@ -5,16 +5,15 @@ use crate::ical::CalendarEvent;
 
 /// Strip control characters (including ANSI escape sequences) from untrusted
 /// text before it is written to the terminal.
-pub fn sanitize(s: &str) -> String {
-    s.chars().filter(|c| !c.is_control()).collect()
+pub fn sanitize(s: &str) -> Vec<&str> {
+    s.matches(|c| !c.is_control()).collect()
 }
 
 /// Like [`sanitize`], but preserves newlines and tabs so multi-line text
 /// (e.g. event descriptions containing `\n`) keeps its line breaks.
-pub fn sanitize_multiline(s: &str) -> String {
-    s.chars()
-        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
-        .collect()
+pub fn sanitize_multiline(s: &str) -> Vec<&str> {
+    s.matches(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+        .collect::<Vec<&str>>()
 }
 
 /// A calendar event together with the `#RRGGBB` accent color its summaries

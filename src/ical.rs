@@ -589,8 +589,8 @@ pub fn export_ical(event: &CalendarEvent) -> String {
 /// from values that are written into an .ics content line without RFC 5545
 /// TEXT escaping (URIs, RRULE, UID, STATUS). Raw control characters would
 /// otherwise break the line structure of the exported calendar.
-fn strip_control_chars(value: &str) -> String {
-    value.chars().filter(|c| !c.is_control()).collect()
+fn strip_control_chars(value: &str) -> Vec<&str> {
+    value.matches(|c| !c.is_control()).collect()
 }
 
 /// Escape a TEXT property value per RFC 5545: backslash, semicolon, comma
