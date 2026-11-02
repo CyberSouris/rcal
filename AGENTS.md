@@ -74,8 +74,9 @@ cargo test           # run the full suite (unit + mock-server tests)
   `rcal add-account` appends a new `ServerConfig` to any existing config
   (duplicate URLs are rejected) instead of replacing it.
 - `src/db.rs` — `rusqlite` database. Schema: `calendars` (`id`, `name`,
-  `ctag`, `sync_token`) and `events` (keyed on `uid`, with
-  `calendar_id`, `etag`, `ical_data`, `updated_at`, ...). Colors are never
+  `ctag`, `sync_token`) and `events` (keyed on `(calendar_id, uid)`, with
+  `etag`, `ical_data`, `updated_at`, ...). The same UID may therefore exist
+  in several calendars. Colors are never
   stored here: they are read from the config and applied at display time.
   Opening a database created by an older rcal drops the obsolete
   `calendars.color` column automatically. Key types:
@@ -124,8 +125,12 @@ Key signatures to remember:
   calendar id prefix), subscription-cached events are only removed locally
   (the feed re-adds them on the next refresh).
 
-Events are keyed only on `uid`; the same UID in two calendars collides in the
-local cache — a known limitation, handle it if the task surfaces it.
+Events are keyed on `(calendar_id, uid)`, so the same UID can live in several
+calendars. Within one calendar a UID must stay unique: the ical parser folds a
+recurring series and its RECURRENCE-ID overrides into one event (preferring the
+series master), `fetch_events` drops repeated UIDs, and the sync path upserts
+instead of blindly inserting. Events without a DTSTART are still tracked by
+sync (the display views skip them).
 
 ## Configuration and credentials
 

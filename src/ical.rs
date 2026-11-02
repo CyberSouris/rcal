@@ -147,10 +147,30 @@ pub fn parse_ical_from_reader<R: BufRead>(reader: R) -> Result<Calendar> {
         // converted to UTC.
         let timezones = build_timezones(&ical_calendar);
 
-        // Parse events
+        // Parse events. A recurring event is serialized as one VEVENT for the
+        // series plus one VEVENT per edited occurrence, all sharing the same
+        // UID. They form a single event for our purposes, so only the series
+        // master (the VEVENT without RECURRENCE-ID, falling back to the first
+        // override) is kept.
+        let mut index_by_uid: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let mut is_override: Vec<bool> = Vec::new();
         for ical_event in &ical_calendar.events {
-            if let Some(event) = parse_event(ical_event, &timezones)? {
-                calendar.events.push(event);
+            let Some((event, override_instance)) = parse_event(ical_event, &timezones)? else {
+                continue;
+            };
+            match index_by_uid.get(&event.uid).copied() {
+                Some(index) => {
+                    if is_override[index] && !override_instance {
+                        calendar.events[index] = event;
+                        is_override[index] = false;
+                    }
+                }
+                None => {
+                    index_by_uid.insert(event.uid.clone(), calendar.events.len());
+                    calendar.events.push(event);
+                    is_override.push(override_instance);
+                }
             }
         }
     }
@@ -158,11 +178,14 @@ pub fn parse_ical_from_reader<R: BufRead>(reader: R) -> Result<Calendar> {
     Ok(calendar)
 }
 
-/// Parse an IcalEvent into a CalendarEvent
+/// Parse an IcalEvent into a CalendarEvent.
+///
+/// The boolean reports whether the component is a recurring-series override
+/// (it carries a RECURRENCE-ID), which callers use to prefer the master.
 fn parse_event(
     ical_event: &ical::parser::ical::component::IcalEvent,
     timezones: &[TimeZoneDef],
-) -> Result<Option<CalendarEvent>> {
+) -> Result<Option<(CalendarEvent, bool)>> {
     let mut uid = String::default();
     let mut summary = String::default();
     let mut description = None;
@@ -173,6 +196,7 @@ fn parse_event(
     let mut all_day = false;
     let mut status = None;
     let mut recurrence = None;
+    let mut recurrence_override = false;
 
     for property in &ical_event.properties {
         match property.name.as_str() {
@@ -214,6 +238,9 @@ fn parse_event(
             "RRULE" => {
                 recurrence.clone_from(&property.value);
             }
+            "RECURRENCE-ID" => {
+                recurrence_override = true;
+            }
             _ => {}
         }
     }
@@ -222,7 +249,7 @@ fn parse_event(
         return Ok(None);
     }
 
-    Ok(Some(CalendarEvent {
+    Ok(Some((CalendarEvent {
         uid,
         summary,
         description,
@@ -233,7 +260,7 @@ fn parse_event(
         all_day,
         status,
         recurrence,
-    }))
+    }, recurrence_override)))
 }
 
 /// Parse a DTSTART/DTEND value, resolving the TZID parameter for floating
@@ -725,6 +752,83 @@ mod tests {
         assert_eq!(back.recurrence.as_deref(), Some("FREQ=WEEKLY;COUNT=4"));
         assert_eq!(back.dtstart.unwrap(), dtstart);
         assert_eq!(back.dtend.unwrap(), dtend);
+    }
+
+    #[test]
+    fn test_parse_recurring_event_with_override_keeps_master() {
+        // A recurring series with one edited occurrence is a single resource
+        // holding two VEVENTs with the same UID.
+        let ics = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+BEGIN:VEVENT\r\n\
+UID:series-1\r\n\
+SUMMARY:Weekly\r\n\
+DTSTART:20240115T090000Z\r\n\
+DTEND:20240115T100000Z\r\n\
+RRULE:FREQ=WEEKLY;COUNT=4\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\n\
+UID:series-1\r\n\
+RECURRENCE-ID:20240122T090000Z\r\n\
+SUMMARY:Weekly (moved)\r\n\
+DTSTART:20240122T110000Z\r\n\
+DTEND:20240122T120000Z\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+
+        let calendar = parse_ical_text(ics).unwrap();
+        assert_eq!(calendar.events.len(), 1);
+        assert_eq!(calendar.events[0].summary, "Weekly");
+        assert_eq!(calendar.events[0].recurrence.as_deref(), Some("FREQ=WEEKLY;COUNT=4"));
+        assert_eq!(
+            calendar.events[0].dtstart,
+            Some(parse_ical_datetime("20240115T090000Z").unwrap())
+        );
+    }
+
+    #[test]
+    fn test_parse_recurring_override_before_master_keeps_master() {
+        // The master is not guaranteed to be serialized first.
+        let ics = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+BEGIN:VEVENT\r\n\
+UID:series-2\r\n\
+RECURRENCE-ID:20240122T090000Z\r\n\
+SUMMARY:Override\r\n\
+DTSTART:20240122T110000Z\r\n\
+DTEND:20240122T120000Z\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\n\
+UID:series-2\r\n\
+SUMMARY:Master\r\n\
+DTSTART:20240115T090000Z\r\n\
+DTEND:20240115T100000Z\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+
+        let calendar = parse_ical_text(ics).unwrap();
+        assert_eq!(calendar.events.len(), 1);
+        assert_eq!(calendar.events[0].summary, "Master");
+    }
+
+    #[test]
+    fn test_parse_lone_recurrence_override_is_kept() {
+        // Some servers can return only the override component; dropping it
+        // would lose the event entirely.
+        let ics = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+BEGIN:VEVENT\r\n\
+UID:series-3\r\n\
+RECURRENCE-ID:20240122T090000Z\r\n\
+SUMMARY:Only override\r\n\
+DTSTART:20240122T110000Z\r\n\
+DTEND:20240122T120000Z\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+
+        let calendar = parse_ical_text(ics).unwrap();
+        assert_eq!(calendar.events.len(), 1);
+        assert_eq!(calendar.events[0].summary, "Only override");
     }
 
     #[test]

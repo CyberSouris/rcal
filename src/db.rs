@@ -558,8 +558,7 @@ impl Database {
                           etag
                    FROM events
                    WHERE calendar_id = ?1
-                     AND dtstart IS NOT NULL
-                   ORDER BY dtstart";
+                   ORDER BY dtstart, uid";
 
         let mut stmt = self.conn.prepare(sql)?;
 
@@ -1286,5 +1285,25 @@ mod tests {
         assert_eq!(stored[1].event.url.as_deref(), Some("https://meet.example.com/abc"));
 
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn test_get_events_for_calendar_includes_undated_events() {
+        let db = Database::open_from(std::path::Path::new(":memory:")).unwrap();
+        db.insert_calendar("cal-a", "A").unwrap();
+
+        let dated = event("uid-dated", "Dated", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0));
+        db.insert_event(&dated, Some("cal-a"), None, Some("\"1\"")).unwrap();
+
+        let mut undated = event("uid-undated", "Undated", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0));
+        undated.dtstart = None;
+        undated.dtend = None;
+        db.insert_event(&undated, Some("cal-a"), None, Some("\"2\"")).unwrap();
+
+        // Sync bookkeeping must see every stored row, including events the
+        // server reports without a DTSTART.
+        let stored = db.get_events_for_calendar("cal-a").unwrap();
+        assert_eq!(stored.len(), 2);
+        assert!(stored.iter().any(|s| s.event.uid == "uid-undated"));
     }
 }

@@ -362,6 +362,11 @@ impl CalDavClient {
             );
         }
 
+        // The same collection can show up through more than one discovery
+        // path (base collection, principal home-set); sync it only once.
+        let mut seen_hrefs = HashSet::new();
+        calendars.retain(|cal| seen_hrefs.insert(cal.href.clone()));
+
         Ok(calendars)
     }
 
@@ -373,6 +378,7 @@ impl CalDavClient {
             .with_context(|| format!("Failed to parse XML response from {}", url))?;
 
         let mut events = Vec::new();
+        let mut seen_uids: HashSet<String> = HashSet::new();
         for resp in multistatus_responses(&doc) {
             let Some(href) = text_of(&resp, "href", DAV_NS) else {
                 continue;
@@ -386,11 +392,16 @@ impl CalDavClient {
                 .with_context(|| format!("Failed to parse calendar data for {}", href))?;
 
             for event in parsed.events {
-                events.push(RemoteEvent {
-                    etag: etag.clone(),
-                    event,
-                    ical_data: data.clone(),
-                });
+                // A UID must identify one event per calendar. Servers that
+                // expose the same object under several resources (or repeated
+                // resources) must not produce duplicate rows.
+                if seen_uids.insert(event.uid.clone()) {
+                    events.push(RemoteEvent {
+                        etag: etag.clone(),
+                        event,
+                        ical_data: data.clone(),
+                    });
+                }
             }
         }
 
@@ -567,7 +578,7 @@ async fn sync_calendar(
                     }
                 }
                 None => {
-                    db.insert_event(
+                    db.upsert_event(
                         &re.event,
                         Some(&cal.href),
                         Some(&re.ical_data),
@@ -1093,7 +1104,7 @@ END:VCALENDAR";
                         }
                     }
                     None => {
-                        db.insert_event(&re.event, Some(&cal.href), Some(&re.ical_data), re.etag.as_deref()).unwrap();
+                        db.upsert_event(&re.event, Some(&cal.href), Some(&re.ical_data), re.etag.as_deref()).unwrap();
                         result.added += 1;
                     }
                 }
@@ -1459,5 +1470,245 @@ END:VCALENDAR";
         let server = pw_server(Some("printf '\\377'"));
         let err = resolve_password(&server).unwrap_err();
         assert!(err.to_string().contains("not valid UTF-8"), "{}", err);
+    }
+
+    fn report_response(href: &str, etag: &str, ical: &str) -> String {
+        format!(
+            r#"<d:response>
+    <d:href>{href}</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:getetag>{etag}</d:getetag>
+        <c:calendar-data>{ical}</c:calendar-data>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>"#
+        )
+    }
+
+    fn report_xml(href: &str, etag: &str, ical: &str) -> String {
+        format!(
+            r#"<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  {}
+</d:multistatus>"#,
+            report_response(href, etag, ical)
+        )
+    }
+
+    #[tokio::test]
+    async fn test_sync_same_uid_in_two_calendars() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let ical = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:shared-1\r\nSUMMARY:Shared\r\nDTSTART:20240115T090000Z\r\nDTEND:20240115T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+        let server = MockServer::start().await;
+        let work = format!("{}/p/work/", server.uri());
+        let personal = format!("{}/p/personal/", server.uri());
+        Mock::given(method("REPORT"))
+            .and(path("/p/work/"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(report_xml("/p/work/shared-1.ics", "\"1\"", ical)))
+            .mount(&server)
+            .await;
+        Mock::given(method("REPORT"))
+            .and(path("/p/personal/"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(report_xml("/p/personal/shared-1.ics", "\"2\"", ical)))
+            .mount(&server)
+            .await;
+
+        let client = CalDavClient::from_parts(&server.uri(), "alice", "pw").unwrap();
+        let db = Database::open_from(std::path::Path::new(":memory:")).unwrap();
+        let cals = vec![
+            RemoteCalendar { href: work.clone(), name: "Work".into() },
+            RemoteCalendar { href: personal.clone(), name: "Personal".into() },
+        ];
+        let summary = client.sync(&db, &cals).await.unwrap();
+        assert_eq!(summary.total_added, 2);
+        assert_eq!(db.get_events_for_calendar(&work).unwrap().len(), 1);
+        assert_eq!(db.get_events_for_calendar(&personal).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_sync_recurring_event_with_override_in_one_resource() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Nextcloud (and CalDAV generally) stores an edited occurrence as a
+        // second VEVENT sharing the series UID inside the same resource.
+        let ical = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:recurring-1\r\nSUMMARY:Weekly\r\nDTSTART:20240115T090000Z\r\nDTEND:20240115T100000Z\r\nRRULE:FREQ=WEEKLY;COUNT=4\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:recurring-1\r\nRECURRENCE-ID:20240122T090000Z\r\nSUMMARY:Weekly (moved)\r\nDTSTART:20240122T110000Z\r\nDTEND:20240122T120000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+        let server = MockServer::start().await;
+        let work = format!("{}/p/work/", server.uri());
+        Mock::given(method("REPORT"))
+            .and(path("/p/work/"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(report_xml("/p/work/recurring-1.ics", "\"1\"", ical)))
+            .mount(&server)
+            .await;
+
+        let client = CalDavClient::from_parts(&server.uri(), "alice", "pw").unwrap();
+        let db = Database::open_from(std::path::Path::new(":memory:")).unwrap();
+        let cals = vec![RemoteCalendar { href: work.clone(), name: "Work".into() }];
+        let summary = client.sync(&db, &cals).await.unwrap();
+        assert_eq!(summary.total_added, 1);
+
+        let stored = db.get_events_for_calendar(&work).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].event.summary, "Weekly", "the series master wins over the override");
+        assert_eq!(
+            stored[0].event.dtstart,
+            Some(crate::ical::parse_ical_datetime("20240115T090000Z").unwrap())
+        );
+        assert_eq!(stored[0].event.recurrence.as_deref(), Some("FREQ=WEEKLY;COUNT=4"));
+    }
+
+    #[tokio::test]
+    async fn test_sync_undated_event_survives_repeated_syncs() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let ical = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:undated-1\r\nSUMMARY:Undated\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+        let server = MockServer::start().await;
+        let work = format!("{}/p/work/", server.uri());
+        Mock::given(method("REPORT"))
+            .and(path("/p/work/"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(report_xml("/p/work/undated-1.ics", "\"1\"", ical)))
+            .mount(&server)
+            .await;
+
+        let client = CalDavClient::from_parts(&server.uri(), "alice", "pw").unwrap();
+        let db = Database::open_from(std::path::Path::new(":memory:")).unwrap();
+        let cals = vec![RemoteCalendar { href: work.clone(), name: "Work".into() }];
+
+        let summary = client.sync(&db, &cals).await.unwrap();
+        assert_eq!(summary.total_added, 1);
+        assert_eq!(db.get_events_for_calendar(&work).unwrap().len(), 1);
+
+        // The event has no DTSTART, but it is still tracked locally: a second
+        // sync must recognise it instead of inserting it again.
+        let summary = client.sync(&db, &cals).await.unwrap();
+        assert_eq!(summary.total_added, 0);
+        assert_eq!(summary.total_unchanged, 1);
+        assert_eq!(db.get_events_for_calendar(&work).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_discover_calendars_dedupes_repeated_hrefs() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // The base collection already advertises `work`, and the principal's
+        // home-set advertises it again next to `personal`.
+        const BASE_XML: &str = r#"<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:response>
+    <d:href>/</d:href>
+    <d:propstat>
+      <d:prop><d:current-user-principal><d:href>/p/</d:href></d:current-user-principal></d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/p/work/</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:resourcetype><d:collection/><c:calendar/></d:resourcetype>
+        <d:displayname>Work</d:displayname>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+</d:multistatus>"#;
+
+        const PRINCIPAL_XML: &str = r#"<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:response>
+    <d:href>/p/</d:href>
+    <d:propstat>
+      <d:prop><c:calendar-home-set><d:href>/p/</d:href></c:calendar-home-set></d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+</d:multistatus>"#;
+
+        const HOME_XML: &str = r#"<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:response>
+    <d:href>/p/work/</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:resourcetype><d:collection/><c:calendar/></d:resourcetype>
+        <d:displayname>Work</d:displayname>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/p/personal/</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:resourcetype><d:collection/><c:calendar/></d:resourcetype>
+        <d:displayname>Personal</d:displayname>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+</d:multistatus>"#;
+
+        let server = MockServer::start().await;
+        Mock::given(method("PROPFIND"))
+            .and(path("/"))
+            .and(header("Depth", "0"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(BASE_XML))
+            .mount(&server)
+            .await;
+        Mock::given(method("PROPFIND"))
+            .and(path("/p/"))
+            .and(header("Depth", "0"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(PRINCIPAL_XML))
+            .mount(&server)
+            .await;
+        Mock::given(method("PROPFIND"))
+            .and(path("/p/"))
+            .and(header("Depth", "1"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(HOME_XML))
+            .mount(&server)
+            .await;
+
+        let client = CalDavClient::from_parts(&server.uri(), "alice", "pw").unwrap();
+        let calendars = client.discover_calendars().await.unwrap();
+        assert_eq!(calendars.len(), 2);
+        assert_eq!(calendars.iter().filter(|c| c.name == "Work").count(), 1);
+        assert!(calendars.iter().any(|c| c.name == "Personal"));
+    }
+
+    #[tokio::test]
+    async fn test_sync_dedupes_same_uid_across_resources() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let ical = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:dup-1\r\nSUMMARY:Once\r\nDTSTART:20240115T090000Z\r\nDTEND:20240115T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let body = format!(
+            "<?xml version=\"1.0\"?>\n<d:multistatus xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\">\n{}\n{}\n</d:multistatus>",
+            report_response("/p/work/a.ics", "\"1\"", ical),
+            report_response("/p/work/b.ics", "\"1\"", ical),
+        );
+
+        let server = MockServer::start().await;
+        let work = format!("{}/p/work/", server.uri());
+        Mock::given(method("REPORT"))
+            .and(path("/p/work/"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(body))
+            .mount(&server)
+            .await;
+
+        let client = CalDavClient::from_parts(&server.uri(), "alice", "pw").unwrap();
+        let db = Database::open_from(std::path::Path::new(":memory:")).unwrap();
+        let cals = vec![RemoteCalendar { href: work.clone(), name: "Work".into() }];
+        let summary = client.sync(&db, &cals).await.unwrap();
+        assert_eq!(summary.total_added, 1);
+        assert_eq!(db.get_events_for_calendar(&work).unwrap().len(), 1);
     }
 }
