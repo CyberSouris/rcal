@@ -1502,11 +1502,18 @@ fn format_event_time(event: &ical::CalendarEvent) -> String {
     match (&event.dtstart, &event.dtend) {
         (Some(start), Some(end)) => {
             if event.all_day {
-                format!(
-                    "All day ({} to {})",
-                    start.format("%Y-%m-%d"),
-                    end.format("%Y-%m-%d")
-                )
+                // DTEND is exclusive: an event with DTSTART 15th and DTEND
+                // 16th covers only the 15th.
+                let last_day = (end.date_naive() - chrono::Days::new(1)).max(start.date_naive());
+                if last_day == start.date_naive() {
+                    format!("All day ({})", start.format("%Y-%m-%d"))
+                } else {
+                    format!(
+                        "All day ({} to {})",
+                        start.format("%Y-%m-%d"),
+                        last_day.format("%Y-%m-%d")
+                    )
+                }
             } else {
                 let start = start.with_timezone(&Local);
                 let end = end.with_timezone(&Local);
@@ -1916,9 +1923,18 @@ mod tests {
     #[test]
     fn test_format_event_time_all_day_range() {
         let start = chrono::DateTime::parse_from_rfc3339("2024-01-15T00:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        let end = chrono::DateTime::parse_from_rfc3339("2024-01-18T00:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        let text = format_event_time(&calendar_event(Some(start), Some(end), true));
+        // DTEND is exclusive, so the event covers 15-17 January.
+        assert_eq!(text, "All day (2024-01-15 to 2024-01-17)");
+    }
+
+    #[test]
+    fn test_format_event_time_all_day_exclusive_end_single_day() {
+        let start = chrono::DateTime::parse_from_rfc3339("2024-01-15T00:00:00Z").unwrap().with_timezone(&chrono::Utc);
         let end = chrono::DateTime::parse_from_rfc3339("2024-01-16T00:00:00Z").unwrap().with_timezone(&chrono::Utc);
         let text = format_event_time(&calendar_event(Some(start), Some(end), true));
-        assert_eq!(text, "All day (2024-01-15 to 2024-01-16)");
+        assert_eq!(text, "All day (2024-01-15)");
     }
 
     #[test]

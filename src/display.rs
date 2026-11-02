@@ -837,28 +837,40 @@ fn format_cell(day: u32, is_today: bool, colors: &[Option<String>]) -> String {
 /// Timed events are bucketed by their date in the user's local timezone;
 /// all-day events (stored at UTC midnight) by their stored date.
 fn event_on_date(event: &CalendarEvent, date: NaiveDate) -> bool {
-    let (Some(start), Some(end)) = (event.dtstart, event.dtend) else {
-        let Some(start) = event.dtstart else {
-            return false;
-        };
-        let start_date = if event.all_day {
-            start.date_naive()
-        } else {
-            start.with_timezone(&Local).date_naive()
-        };
-        return date >= start_date;
+    let Some(start) = event.dtstart else {
+        return false;
     };
     let start_date = if event.all_day {
         start.date_naive()
     } else {
         start.with_timezone(&Local).date_naive()
     };
-    let end_date = if event.all_day {
-        end.date_naive()
-    } else {
-        end.with_timezone(&Local).date_naive()
+
+    let Some(end) = event.dtend else {
+        // An event without an end is a point in time: show it only on its
+        // start date instead of letting it leak into every later day.
+        return date == start_date;
     };
-    date >= start_date && date <= end_date
+
+    if event.all_day {
+        // RFC 5545 treats DTEND as exclusive for all-day events: a one-day
+        // event on the 15th ends on the 16th and must not appear there too.
+        let end_date = end.date_naive();
+        if end_date <= start_date {
+            return date == start_date;
+        }
+        return date >= start_date && date < end_date;
+    }
+
+    let end_local = end.with_timezone(&Local);
+    let end_date = end_local.date_naive();
+    let ends_at_midnight =
+        end_local.hour() == 0 && end_local.minute() == 0 && end_local.second() == 0;
+    if ends_at_midnight && end_date > start_date {
+        date >= start_date && date < end_date
+    } else {
+        date >= start_date && date <= end_date
+    }
 }
 
 /// The date a user thinks of an event as occurring on.
@@ -876,13 +888,16 @@ fn format_event_time(event: &CalendarEvent) -> String {
     match (&event.dtstart, &event.dtend) {
         (Some(start), Some(end)) => {
             if event.all_day {
-                if start.date_naive() == end.date_naive() {
+                // DTEND is exclusive, so subtract one day to show the last day
+                // the event actually covers.
+                let last_day = (end.date_naive() - chrono::Days::new(1)).max(start.date_naive());
+                if last_day == start.date_naive() {
                     "All day".to_string()
                 } else {
                     format!(
                         "{} - {}",
                         start.format("%b %e"),
-                        end.format("%b %e, %Y")
+                        last_day.format("%b %e, %Y")
                     )
                 }
             } else {
@@ -976,6 +991,132 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
         let output = render_day(&[], date);
         assert!(output.contains("No events"));
+    }
+
+    #[test]
+    fn test_event_without_end_only_occurs_on_start_date() {
+        // Events stored without DTEND (e.g. a DURATION that could not be
+        // parsed) must not be treated as continuing into every later day.
+        let start = Local.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).single().unwrap();
+        let event = make_event("Open ended", Some(start.with_timezone(&Utc)), None);
+
+        assert!(event_on_date(
+            &event,
+            NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()
+        ));
+        assert!(!event_on_date(
+            &event,
+            NaiveDate::from_ymd_opt(2024, 1, 16).unwrap()
+        ));
+        assert!(!event_on_date(
+            &event,
+            NaiveDate::from_ymd_opt(2024, 1, 22).unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_all_day_event_end_is_exclusive() {
+        let mut event = make_event(
+            "Holiday",
+            Some(Utc.from_utc_datetime(
+                &NaiveDate::from_ymd_opt(2024, 1, 15)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap(),
+            )),
+            Some(Utc.from_utc_datetime(
+                &NaiveDate::from_ymd_opt(2024, 1, 16)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap(),
+            )),
+        );
+        event.all_day = true;
+
+        assert!(event_on_date(
+            &event,
+            NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()
+        ));
+        // DTEND is exclusive: the event ends when the 16th starts.
+        assert!(!event_on_date(
+            &event,
+            NaiveDate::from_ymd_opt(2024, 1, 16).unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_all_day_event_spanning_multiple_days() {
+        let mut event = make_event(
+            "Conference",
+            Some(Utc.from_utc_datetime(
+                &NaiveDate::from_ymd_opt(2024, 1, 15)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap(),
+            )),
+            Some(Utc.from_utc_datetime(
+                &NaiveDate::from_ymd_opt(2024, 1, 18)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap(),
+            )),
+        );
+        event.all_day = true;
+
+        for day in 15..=17 {
+            assert!(event_on_date(
+                &event,
+                NaiveDate::from_ymd_opt(2024, 1, day).unwrap()
+            ));
+        }
+        assert!(!event_on_date(
+            &event,
+            NaiveDate::from_ymd_opt(2024, 1, 18).unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_all_day_time_label_uses_inclusive_last_day() {
+        let mut event = make_event(
+            "Trip",
+            Some(Utc.from_utc_datetime(
+                &NaiveDate::from_ymd_opt(2024, 1, 15)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap(),
+            )),
+            Some(Utc.from_utc_datetime(
+                &NaiveDate::from_ymd_opt(2024, 1, 18)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap(),
+            )),
+        );
+        event.all_day = true;
+        assert_eq!(format_event_time(&event), "Jan 15 - Jan 17, 2024");
+    }
+
+    #[test]
+    fn test_timed_event_ending_at_midnight_does_not_span_next_day() {
+        let start = Local.with_ymd_and_hms(2024, 1, 15, 22, 0, 0).single().unwrap();
+        let end = Local.with_ymd_and_hms(2024, 1, 16, 0, 0, 0).single().unwrap();
+        let event = local_event("Late", start, end);
+
+        assert!(event_on_date(
+            &event,
+            NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()
+        ));
+        assert!(!event_on_date(
+            &event,
+            NaiveDate::from_ymd_opt(2024, 1, 16).unwrap()
+        ));
+
+        // An event that really spills into the next day still spans both.
+        let later = local_event("Overnight", start, end + chrono::Duration::hours(2));
+        assert!(event_on_date(
+            &later,
+            NaiveDate::from_ymd_opt(2024, 1, 16).unwrap()
+        ));
     }
 
     #[test]

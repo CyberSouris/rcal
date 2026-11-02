@@ -83,7 +83,9 @@ cargo test           # run the full suite (unit + mock-server tests)
   `StoredEvent { event, etag, calendar_id }`,
   `Calendar { id, name, event_count }`.
 - `src/ical.rs` — parse .ics files/text, export events (`export_ical`,
-  RFC 5545 `fold_line`), `parse_ical_datetime`.
+  RFC 5545 `fold_line`), `parse_ical_datetime`. A VEVENT that carries
+  `DURATION` instead of `DTEND` gets its end derived from the duration, so
+  synced events are never left open-ended.
 - `src/caldav.rs` — `CalDavClient` (`new` takes a `&ServerConfig`),
   password resolution (`resolve_password` takes `&ServerConfig`), PROPFIND
   discovery, REPORT `calendar-query` fetch, ETag-based sync, PUT push, DELETE
@@ -96,6 +98,8 @@ cargo test           # run the full suite (unit + mock-server tests)
   color, calendar }` (with `Deref` to `CalendarEvent`) carries each event's
   accent color and its calendar name; `colorize` / `pad_to_width` /
   `visible_width` utilities for ANSI 24-bit foreground accent coloring.
+  `event_on_date` treats all-day `DTEND` as exclusive (RFC 5545) and shows
+  an event without `DTEND` only on its start date.
   Render signatures take `&[ColoredEvent]` (or `Option<&str>` for
   single-detail rendering). `render_month` takes `term_width: usize` and
   appends a per-calendar event listing below the grid

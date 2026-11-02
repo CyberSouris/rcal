@@ -196,6 +196,7 @@ fn parse_event(
     let mut all_day = false;
     let mut status = None;
     let mut recurrence = None;
+    let mut duration = None;
     let mut recurrence_override = false;
 
     for property in &ical_event.properties {
@@ -232,6 +233,9 @@ fn parse_event(
                     dtend = parse_event_datetime(property, value, timezones).ok();
                 }
             }
+            "DURATION" => {
+                duration = property.value.as_deref().and_then(parse_ical_duration);
+            }
             "STATUS" => {
                 status.clone_from(&property.value);
             }
@@ -247,6 +251,17 @@ fn parse_event(
 
     if uid.is_empty() {
         return Ok(None);
+    }
+
+    // RFC 5545 allows a VEVENT to carry a DURATION instead of a DTEND. Without
+    // resolving it the event has no end and would be displayed as continuing
+    // indefinitely.
+    if dtend.is_none() {
+        if let (Some(start), Some(length)) = (dtstart, duration) {
+            if length > chrono::Duration::zero() {
+                dtend = start.checked_add_signed(length);
+            }
+        }
     }
 
     Ok(Some((CalendarEvent {
@@ -542,6 +557,62 @@ pub fn parse_ical_datetime(value: &str) -> Result<DateTime<Utc>> {
     }
 }
 
+/// Parse an RFC 5545 DURATION value such as `PT1H`, `P1D`, `P2W`, or
+/// `P1DT2H30M`. Negative or zero-length results are not useful for events
+/// and are rejected by the caller.
+fn parse_ical_duration(value: &str) -> Option<chrono::Duration> {
+    let value = value.trim();
+    let (sign, body) = match value.strip_prefix('-') {
+        Some(rest) => (-1i64, rest),
+        None => (1, value.strip_prefix('+').unwrap_or(value)),
+    };
+    let body = body.strip_prefix('P')?;
+    if body.is_empty() {
+        return None;
+    }
+
+    let mut in_time = false;
+    let mut total_seconds: i64 = 0;
+    let mut number = String::new();
+    let mut saw_component = false;
+
+    for ch in body.chars() {
+        match ch {
+            'T' => {
+                // `T` separates the date and time parts and may appear once.
+                if in_time || !number.is_empty() {
+                    return None;
+                }
+                in_time = true;
+            }
+            'W' | 'D' | 'H' | 'M' | 'S' => {
+                let amount: i64 = number.parse().ok()?;
+                number.clear();
+                let seconds = match (ch, in_time) {
+                    ('W', false) => amount.checked_mul(7 * 86_400)?,
+                    ('D', false) => amount.checked_mul(86_400)?,
+                    ('H', true) => amount.checked_mul(3_600)?,
+                    ('M', true) => amount.checked_mul(60)?,
+                    ('S', true) => amount,
+                    // `W`/`D` belong to the date part, `H`/`M`/`S` to the
+                    // time part.
+                    _ => return None,
+                };
+                total_seconds = total_seconds.checked_add(seconds)?;
+                saw_component = true;
+            }
+            c if c.is_ascii_digit() => number.push(c),
+            _ => return None,
+        }
+    }
+
+    if !saw_component || !number.is_empty() {
+        return None;
+    }
+
+    Some(chrono::Duration::seconds(sign * total_seconds))
+}
+
 /// Serialize an event back into iCal (RFC 5545) format.
 ///
 /// The output is a complete VCALENDAR with a single VEVENT, suitable
@@ -720,6 +791,89 @@ mod tests {
     fn test_parse_ical_date() {
         let result = parse_ical_datetime("20240115");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_duration_units() {
+        assert_eq!(parse_ical_duration("PT30M"), Some(chrono::Duration::minutes(30)));
+        assert_eq!(parse_ical_duration("PT1H30M"), Some(chrono::Duration::minutes(90)));
+        assert_eq!(parse_ical_duration("P1D"), Some(chrono::Duration::days(1)));
+        assert_eq!(parse_ical_duration("P2W"), Some(chrono::Duration::days(14)));
+        assert_eq!(
+            parse_ical_duration("P1DT2H"),
+            Some(chrono::Duration::days(1) + chrono::Duration::hours(2))
+        );
+        assert_eq!(parse_ical_duration("P0D"), Some(chrono::Duration::zero()));
+        assert_eq!(parse_ical_duration("nonsense"), None);
+        assert_eq!(parse_ical_duration("P"), None);
+        assert_eq!(parse_ical_duration("PT"), None);
+        assert_eq!(parse_ical_duration("P1H"), None);
+        assert_eq!(parse_ical_duration("P1M"), None);
+    }
+
+    #[test]
+    fn test_parse_event_with_duration_instead_of_dtend() {
+        // Some clients (and Nextcloud resources) send DURATION rather than
+        // DTEND. The end must be derived so the event does not look open-ended.
+        let ics = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+BEGIN:VEVENT\r\n\
+UID:duration-1\r\n\
+SUMMARY:Weekly\r\n\
+DTSTART:20240115T090000Z\r\n\
+DURATION:PT30M\r\n\
+RRULE:FREQ=WEEKLY\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+
+        let calendar = parse_ical_text(ics).unwrap();
+        assert_eq!(calendar.events.len(), 1);
+        let event = &calendar.events[0];
+        assert_eq!(
+            event.dtend,
+            Some(parse_ical_datetime("20240115T093000Z").unwrap())
+        );
+    }
+
+    #[test]
+    fn test_parse_all_day_event_with_duration() {
+        let ics = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+BEGIN:VEVENT\r\n\
+UID:duration-2\r\n\
+SUMMARY:Holiday\r\n\
+DTSTART;VALUE=DATE:20240115\r\n\
+DURATION:P1D\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+
+        let calendar = parse_ical_text(ics).unwrap();
+        let event = &calendar.events[0];
+        assert!(event.all_day);
+        assert_eq!(
+            event.dtend,
+            Some(parse_ical_datetime("20240116").unwrap())
+        );
+    }
+
+    #[test]
+    fn test_parse_event_prefers_dtend_over_duration() {
+        let ics = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+BEGIN:VEVENT\r\n\
+UID:duration-3\r\n\
+SUMMARY:Meeting\r\n\
+DTSTART:20240115T090000Z\r\n\
+DTEND:20240115T100000Z\r\n\
+DURATION:PT3H\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+
+        let calendar = parse_ical_text(ics).unwrap();
+        assert_eq!(
+            calendar.events[0].dtend,
+            Some(parse_ical_datetime("20240115T100000Z").unwrap())
+        );
     }
 
     #[test]
