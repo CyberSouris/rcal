@@ -121,6 +121,9 @@ enum Commands {
     /// Synchronize with CalDAV server and refresh ICS subscriptions
     Sync,
 
+    /// Drop the local cache and force a full re-sync from all remotes
+    ForceSync,
+
     /// Create a new event
     New {
         /// Event title (prompted if omitted)
@@ -230,6 +233,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     let global_details = cli.details;
+    let force_sync = matches!(cli.command, Some(Commands::ForceSync));
     match cli.command {
         Some(Commands::Today { details, next, date }) => {
             let base = match date {
@@ -254,8 +258,14 @@ async fn main() -> anyhow::Result<()> {
             add,
             dry_run,
         }) => handle_import(&file, add, dry_run),
-        Some(Commands::Sync) => {
+        Some(Commands::Sync) | Some(Commands::ForceSync) => {
             let config = config::Config::load()?;
+            if force_sync {
+                let path = config::Config::db_path()?;
+                let _ = std::fs::remove_file(&path);
+                println!("Dropped local cache at {}", path.display());
+                println!();
+            }
             if config.servers.is_empty() && config.subscriptions.is_empty() {
                 return Err(anyhow::anyhow!(
                     "No CalDAV account or ICS subscription configured. Run 'rcal add-account' \
