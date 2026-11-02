@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -424,7 +425,31 @@ impl Config {
 
     /// The calendar names that should be shown with no command-line filters.
     pub fn default_calendar_names(&self, all_names: &[String]) -> Vec<String> {
-        if !self.display.displayed_calendars.is_empty() {
+        let entries = &self.display.displayed_calendars;
+        let has_operator = entries
+            .iter()
+            .any(|entry| entry.starts_with('+') || entry.starts_with('-'));
+        if has_operator {
+            let mut allowed: HashSet<String> = HashSet::new();
+            for entry in entries {
+                if let Some(name) = entry.strip_prefix('+') {
+                    for member in self.group_members(name.trim(), all_names) {
+                        allowed.insert(member);
+                    }
+                } else if let Some(name) = entry.strip_prefix('-') {
+                    for member in self.group_members(name.trim(), all_names) {
+                        allowed.remove(&member);
+                    }
+                } else {
+                    for member in self.group_members(entry.trim(), all_names) {
+                        allowed.insert(member);
+                    }
+                }
+            }
+            return allowed.into_iter().collect();
+        }
+
+        if !entries.is_empty() {
             self.display
                 .displayed_calendars
                 .iter()
