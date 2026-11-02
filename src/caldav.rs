@@ -553,8 +553,24 @@ async fn sync_calendar(
             let uid = &re.event.uid;
             match local_by_uid.get(uid) {
                 Some(ls) if ls.etag.as_deref() == re.etag.as_deref() => {
-                    // Unchanged on the server
-                    result.unchanged += 1;
+                    // Unchanged on the server. Refresh rows cached by an older
+                    // rcal that could not represent recurrence exceptions or
+                    // derived DTEND from DURATION yet.
+                    if ls.event.dtstart == re.event.dtstart
+                        && ls.event.dtend == re.event.dtend
+                        && ls.event.recurrence == re.event.recurrence
+                        && ls.event.exdates == re.event.exdates
+                    {
+                        result.unchanged += 1;
+                    } else {
+                        db.upsert_event(
+                            &re.event,
+                            Some(&cal.href),
+                            Some(&re.ical_data),
+                            re.etag.as_deref(),
+                        )?;
+                        result.updated += 1;
+                    }
                 }
                 Some(_) => {
                     // The etag moved. Refresh the sync metadata even when the
@@ -1142,6 +1158,7 @@ END:VCALENDAR";
                 all_day: false,
                 status: None,
                 recurrence: None,
+                exdates: Vec::new(),
             };
             let evt2 = CalendarEvent {
                 uid: "evt-2@example.com".to_string(),
@@ -1154,6 +1171,7 @@ END:VCALENDAR";
                 all_day: false,
                 status: None,
                 recurrence: None,
+                exdates: Vec::new(),
             };
             let evt3 = CalendarEvent {
                 uid: "evt-3@example.com".to_string(),
@@ -1166,6 +1184,7 @@ END:VCALENDAR";
                 all_day: false,
                 status: None,
                 recurrence: None,
+                exdates: Vec::new(),
             };
 
             // Initial sync: all three events new on the server
@@ -1318,6 +1337,7 @@ END:VCALENDAR";
             all_day: false,
             status: None,
             recurrence: None,
+            exdates: Vec::new(),
         };
         db.insert_calendar(&work, "Work").unwrap();
         db.insert_event(&local_evt, Some(&work), None, None).unwrap();

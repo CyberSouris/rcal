@@ -17,6 +17,8 @@ pub struct CalendarEvent {
     pub all_day: bool,
     pub status: Option<String>,
     pub recurrence: Option<String>,
+    /// Instants removed from a recurring series (`EXDATE`).
+    pub exdates: Vec<DateTime<Utc>>,
 }
 
 /// A timezone definition parsed from a VTIMEZONE component. Used to resolve
@@ -196,6 +198,7 @@ fn parse_event(
     let mut all_day = false;
     let mut status = None;
     let mut recurrence = None;
+    let mut exdates = Vec::new();
     let mut duration = None;
     let mut recurrence_override = false;
 
@@ -242,6 +245,15 @@ fn parse_event(
             "RRULE" => {
                 recurrence.clone_from(&property.value);
             }
+            "EXDATE" => {
+                if let Some(value) = &property.value {
+                    for part in value.split(',') {
+                        if let Ok(date) = parse_event_datetime(property, part.trim(), timezones) {
+                            exdates.push(date);
+                        }
+                    }
+                }
+            }
             "RECURRENCE-ID" => {
                 recurrence_override = true;
             }
@@ -275,6 +287,7 @@ fn parse_event(
         all_day,
         status,
         recurrence,
+        exdates,
     }, recurrence_override)))
 }
 
@@ -678,6 +691,21 @@ pub fn export_ical(event: &CalendarEvent) -> String {
         }
     }
 
+    for exdate in &event.exdates {
+        if event.all_day {
+            out.push_str(&fold_line(&format!(
+                "EXDATE;VALUE=DATE:{}",
+                exdate.format("%Y%m%d")
+            )));
+        } else {
+            out.push_str(&fold_line(&format!(
+                "EXDATE:{}",
+                exdate.format("%Y%m%dT%H%M%SZ")
+            )));
+        }
+        out.push_str("\r\n");
+    }
+
     out.push_str("END:VEVENT\r\n");
     out.push_str("END:VCALENDAR\r\n");
     out
@@ -891,6 +919,7 @@ END:VCALENDAR\r\n";
             all_day: false,
             status: Some("CONFIRMED".to_string()),
             recurrence: Some("FREQ=WEEKLY;COUNT=4".to_string()),
+            exdates: Vec::new(),
         };
 
         let ical = export_ical(&event);
@@ -998,6 +1027,7 @@ END:VCALENDAR\r\n";
             all_day: false,
             status: Some("CONFIRMED".to_string()),
             recurrence: None,
+            exdates: Vec::new(),
         };
 
         let ical = export_ical(&event);
@@ -1029,6 +1059,7 @@ END:VCALENDAR\r\n";
             all_day: false,
             status: Some("CONFIRMED\nPWNED".to_string()),
             recurrence: Some("FREQ=WEEKLY\r\nRRULE2:x".to_string()),
+            exdates: Vec::new(),
         };
 
         let ical = export_ical(&event);

@@ -836,7 +836,7 @@ fn format_cell(day: u32, is_today: bool, colors: &[Option<String>]) -> String {
 ///
 /// Timed events are bucketed by their date in the user's local timezone;
 /// all-day events (stored at UTC midnight) by their stored date.
-fn event_on_date(event: &CalendarEvent, date: NaiveDate) -> bool {
+pub(crate) fn event_on_date(event: &CalendarEvent, date: NaiveDate) -> bool {
     let Some(start) = event.dtstart else {
         return false;
     };
@@ -956,6 +956,7 @@ mod tests {
             all_day: false,
             status: None,
             recurrence: None,
+            exdates: Vec::new(),
         }
     }
 

@@ -155,6 +155,7 @@ impl Database {
                     all_day BOOLEAN DEFAULT FALSE,
                     status TEXT,
                     recurrence TEXT,
+                    exdates TEXT,
                     ical_data TEXT,
                     etag TEXT,
                     last_modified DATETIME,
@@ -170,6 +171,7 @@ impl Database {
             self.migrate_legacy_events()?;
         }
         self.ensure_event_column("url")?;
+        self.ensure_event_column("exdates")?;
 
         // Older databases stored a per-calendar color in `calendars.color`.
         // Colors now come from the config file and are applied at display
@@ -228,6 +230,7 @@ impl Database {
                     all_day BOOLEAN DEFAULT FALSE,
                     status TEXT,
                     recurrence TEXT,
+                    exdates TEXT,
                     ical_data TEXT,
                     etag TEXT,
                     last_modified DATETIME,
@@ -237,12 +240,12 @@ impl Database {
                 );
                 INSERT INTO events (
                     uid, calendar_id, summary, description, location,
-                    dtstart, dtend, all_day, status, recurrence,
+                    dtstart, dtend, all_day, status, recurrence, exdates,
                     ical_data, etag, last_modified, created_at, updated_at, synced_at
                 )
                 SELECT
                     uid, calendar_id, summary, description, location,
-                    dtstart, dtend, all_day, status, recurrence,
+                    dtstart, dtend, all_day, status, recurrence, NULL,
                     ical_data, etag, last_modified, created_at, updated_at, synced_at
                 FROM events_legacy;
                 DROP TABLE events_legacy;
@@ -336,8 +339,9 @@ impl Database {
         self.conn.execute(
             "INSERT INTO events
              (uid, calendar_id, summary, description, location, url,
-              dtstart, dtend, all_day, status, recurrence, ical_data, etag, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+              dtstart, dtend, all_day, status, recurrence, exdates,
+              ical_data, etag, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 event.uid.clone(),
                 calendar_id,
@@ -350,6 +354,7 @@ impl Database {
                 event.all_day,
                 event.status,
                 event.recurrence,
+                encode_exdates(&event.exdates),
                 ical_data,
                 etag,
                 now,
@@ -373,7 +378,7 @@ impl Database {
     pub fn get_all_events(&self, from: Option<DateTime<Utc>>, to: Option<DateTime<Utc>>) -> Result<Vec<CalendarEvent>> {
         let mut sql = String::from(
             "SELECT uid, summary, description, location, url,
-                    dtstart, dtend, all_day, status, recurrence
+                    dtstart, dtend, all_day, status, recurrence, exdates
              FROM events
              WHERE dtstart IS NOT NULL",
         );
@@ -409,7 +414,7 @@ impl Database {
     ) -> Result<Vec<StoredEvent>> {
         let mut sql = String::from(
             "SELECT uid, summary, description, location, url,
-                    dtstart, dtend, all_day, status, recurrence,
+                    dtstart, dtend, all_day, status, recurrence, exdates,
                     etag, calendar_id
              FROM events
              WHERE dtstart IS NOT NULL",
@@ -430,8 +435,8 @@ impl Database {
 
         let refs: Vec<&str> = query_params.iter().map(|s| s.as_str()).collect();
         let rows = stmt.query_map(rusqlite::params_from_iter(refs), |row| {
-            let etag: Option<String> = row.get(10)?;
-            let calendar_id: Option<String> = row.get(11)?;
+            let etag: Option<String> = row.get(11)?;
+            let calendar_id: Option<String> = row.get(12)?;
             Ok(StoredEvent {
                 event: event_stub_from_row(row),
                 etag,
@@ -456,7 +461,7 @@ impl Database {
         let sql = match exclude_uid {
             Some(_) => String::from(
                 "SELECT uid, summary, description, location, url,
-                        dtstart, dtend, all_day, status, recurrence
+                        dtstart, dtend, all_day, status, recurrence, exdates
                  FROM events
                  WHERE dtstart IS NOT NULL
                    AND uid != ?3
@@ -466,7 +471,7 @@ impl Database {
             ),
             None => String::from(
                 "SELECT uid, summary, description, location, url,
-                        dtstart, dtend, all_day, status, recurrence
+                        dtstart, dtend, all_day, status, recurrence, exdates
                  FROM events
                  WHERE dtstart IS NOT NULL
                    AND dtstart < ?2
@@ -511,12 +516,13 @@ impl Database {
                 all_day = ?8,
                 status = ?9,
                 recurrence = ?10,
-                ical_data = ?11,
-                calendar_id = ?13,
-                etag = ?14,
-                updated_at = ?12,
-                last_modified = ?12
-             WHERE calendar_id IS ?13 AND uid = ?1",
+                exdates = ?11,
+                ical_data = ?12,
+                calendar_id = ?14,
+                etag = ?15,
+                updated_at = ?13,
+                last_modified = ?13
+             WHERE calendar_id IS ?14 AND uid = ?1",
             params![
                 event.uid,
                 event.summary,
@@ -528,6 +534,7 @@ impl Database {
                 event.all_day,
                 event.status,
                 event.recurrence,
+                encode_exdates(&event.exdates),
                 ical_data,
                 now,
                 calendar_id,
@@ -554,7 +561,7 @@ impl Database {
     /// Get all events belonging to a specific calendar, with sync metadata
     pub fn get_events_for_calendar(&self, calendar_id: &str) -> Result<Vec<StoredEvent>> {
         let sql = "SELECT uid, summary, description, location, url,
-                          dtstart, dtend, all_day, status, recurrence,
+                          dtstart, dtend, all_day, status, recurrence, exdates,
                           etag
                    FROM events
                    WHERE calendar_id = ?1
@@ -563,7 +570,7 @@ impl Database {
         let mut stmt = self.conn.prepare(sql)?;
 
         let rows = stmt.query_map(params![calendar_id], |row| {
-            let etag: Option<String> = row.get(10)?;
+            let etag: Option<String> = row.get(11)?;
 
             Ok(StoredEvent {
                 event: event_stub_from_row(row),
@@ -619,7 +626,36 @@ fn is_safe_identifier(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
-/// Map the event portion of a database row (columns 0-9) to a CalendarEvent
+/// Serialize EXDATE instants for the `exdates` column. They are stored as a
+/// comma-separated list of RFC 3339 timestamps; an empty list is `NULL`.
+fn encode_exdates(exdates: &[DateTime<Utc>]) -> Option<String> {
+    if exdates.is_empty() {
+        None
+    } else {
+        Some(
+            exdates
+                .iter()
+                .map(|d| d.to_rfc3339())
+                .collect::<Vec<_>>()
+                .join(","),
+        )
+    }
+}
+
+/// Read the `exdates` column back into instants, ignoring malformed entries.
+fn decode_exdates(value: Option<String>) -> Vec<DateTime<Utc>> {
+    value
+        .as_deref()
+        .map(|raw| {
+            raw.split(',')
+                .filter_map(|part| DateTime::parse_from_rfc3339(part.trim()).ok())
+                .map(|d| d.with_timezone(&Utc))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Map the event portion of a database row (columns 0-10) to a CalendarEvent
 fn event_stub_from_row(row: &rusqlite::Row) -> CalendarEvent {
     let dtstart: Option<String> = row.get(5).unwrap_or(None);
     let dtend: Option<String> = row.get(6).unwrap_or(None);
@@ -638,6 +674,7 @@ fn event_stub_from_row(row: &rusqlite::Row) -> CalendarEvent {
         all_day,
         status: row.get(8).unwrap_or(None),
         recurrence: row.get(9).unwrap_or(None),
+        exdates: decode_exdates(row.get(10).unwrap_or(None)),
     }
 }
 
@@ -674,7 +711,7 @@ impl Database {
             .conn
             .prepare(
                 "SELECT uid, summary, description, location, url,
-                        dtstart, dtend, all_day, status, recurrence,
+                        dtstart, dtend, all_day, status, recurrence, exdates,
                         etag, calendar_id
                  FROM events
                  WHERE dtstart IS NOT NULL
@@ -685,8 +722,8 @@ impl Database {
             )?;
 
         let rows = stmt.query_map(params![start_str, end_str], |row| {
-            let etag: Option<String> = row.get(10)?;
-            let calendar_id: Option<String> = row.get(11)?;
+            let etag: Option<String> = row.get(11)?;
+            let calendar_id: Option<String> = row.get(12)?;
             Ok(StoredEvent {
                 event: event_stub_from_row(row),
                 etag,
@@ -728,6 +765,7 @@ mod tests {
             all_day: false,
             status: Some("CONFIRMED".to_string()),
             recurrence: None,
+            exdates: Vec::new(),
         }
     }
 
@@ -859,6 +897,7 @@ mod tests {
                     all_day BOOLEAN DEFAULT FALSE,
                     status TEXT,
                     recurrence TEXT,
+                    exdates TEXT,
                     ical_data TEXT,
                     etag TEXT,
                     last_modified DATETIME,
@@ -1048,6 +1087,7 @@ mod tests {
                     all_day BOOLEAN DEFAULT FALSE,
                     status TEXT,
                     recurrence TEXT,
+                    exdates TEXT,
                     ical_data TEXT,
                     etag TEXT,
                     last_modified DATETIME,
@@ -1247,6 +1287,7 @@ mod tests {
                     all_day BOOLEAN DEFAULT FALSE,
                     status TEXT,
                     recurrence TEXT,
+                    exdates TEXT,
                     ical_data TEXT,
                     etag TEXT,
                     last_modified DATETIME,

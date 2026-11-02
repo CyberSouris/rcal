@@ -3,9 +3,10 @@ mod config;
 mod db;
 mod display;
 mod ical;
+mod recurrence;
 mod subscribe;
 
-use chrono::{Days, Local, Months, NaiveDate, NaiveTime};
+use chrono::{Datelike, Days, Local, Months, NaiveDate, NaiveTime};
 use clap::{Parser, Subcommand};
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -418,10 +419,17 @@ async fn main() -> anyhow::Result<()> {
 /// `time` is shown, rendered with full details.
 fn show_day(date: NaiveDate, time: Option<NaiveTime>, details: bool) -> anyhow::Result<()> {
     let db = db::Database::open()?;
-    let stored = db.get_stored_events_for_day(date)?;
-    let colored = colored_events(&stored, &calendar_meta_map(&db), accent_color().as_deref());
+    let stored = db.get_all_stored_events(None, None)?;
+    let stored = expand_stored_events(stored, date, date);
 
     if let Some(time) = time {
+        // Only events actually on this day may be matched by time of day.
+        let day_events: Vec<db::StoredEvent> = stored
+            .into_iter()
+            .filter(|s| display::event_on_date(&s.event, date))
+            .collect();
+        let colored =
+            colored_events(&day_events, &calendar_meta_map(&db), accent_color().as_deref());
         let plain: Vec<&ical::CalendarEvent> = colored.iter().map(|c| &c.event).collect();
         let event = find_event_at_time(&plain, time)
             .ok_or_else(|| anyhow::anyhow!("No event found at {} on {}", time, date))?;
@@ -433,6 +441,8 @@ fn show_day(date: NaiveDate, time: Option<NaiveTime>, details: bool) -> anyhow::
         print!("{}", display::render_event_details(event, color.as_deref()));
         return Ok(());
     }
+
+    let colored = colored_events(&stored, &calendar_meta_map(&db), accent_color().as_deref());
     if details {
         print!("{}", display::render_day_details(&colored, date));
     } else {
@@ -496,6 +506,27 @@ fn colored_events<'a>(
         .collect()
 }
 
+/// Expand recurring events into the occurrences that overlap `from..=to`.
+/// Non-recurring events are kept as they are; the renderers filter them by
+/// date. Metadata (`etag`, `calendar_id`) travels with every occurrence.
+fn expand_stored_events(
+    stored: Vec<db::StoredEvent>,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Vec<db::StoredEvent> {
+    let mut expanded = Vec::new();
+    for item in stored {
+        for event in recurrence::expand(&item.event, from, to) {
+            expanded.push(db::StoredEvent {
+                event,
+                etag: item.etag.clone(),
+                calendar_id: item.calendar_id.clone(),
+            });
+        }
+    }
+    expanded
+}
+
 /// Best-effort terminal width in columns. Falls back to 80 when stdout is not
 /// a terminal or its size cannot be determined.
 fn terminal_width() -> usize {
@@ -547,7 +578,10 @@ fn show_week(date: Option<String>, next: u8, agenda: bool, details: bool) -> any
         None => Local::now().date_naive(),
     };
     let start = start + Days::new(7 * next as u64);
+    let monday = start - Days::new(start.weekday().num_days_from_monday() as u64);
+    let sunday = monday + Days::new(6);
     let all = db.get_all_stored_events(None, None)?;
+    let all = expand_stored_events(all, monday, sunday);
     let colored = colored_events(&all, &calendar_meta_map(&db), accent_color().as_deref());
     print!("{}", display::render_week(&colored, start, agenda, details));
     Ok(())
@@ -569,7 +603,11 @@ fn show_month(
         None => Local::now().date_naive(),
     };
     let month_date = month_date + Months::new(next as u32);
+    let first_day = NaiveDate::from_ymd_opt(month_date.year(), month_date.month(), 1)
+        .unwrap_or(month_date);
+    let last_day = (first_day + Months::new(1)) - Days::new(1);
     let all = db.get_all_stored_events(None, None)?;
+    let all = expand_stored_events(all, first_day, last_day);
     let colored = colored_events(&all, &calendar_meta_map(&db), accent_color().as_deref());
     print!(
         "{}",
@@ -1029,6 +1067,7 @@ fn handle_new(
         all_day,
         status: Some("CONFIRMED".to_string()),
         recurrence: None,
+        exdates: Vec::new(),
     };
 
     print_event_preview(&event, &calendar_id, &calendars, config.as_ref());
@@ -1617,6 +1656,7 @@ mod tests {
                 all_day: false,
                 status: None,
                 recurrence: None,
+                exdates: Vec::new(),
             },
             etag: etag.map(String::from),
             calendar_id: cal_id.map(String::from),
@@ -1917,6 +1957,7 @@ mod tests {
             all_day,
             status: None,
             recurrence: None,
+            exdates: Vec::new(),
         }
     }
 
