@@ -21,6 +21,10 @@ pub struct Config {
     /// events and never stored in the database.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub calendar_colors: Vec<CalendarColorEntry>,
+    /// Named groups of calendars, referenced from the command line as
+    /// `+name`/`-name` and from `[display] displayed_calendars`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calendar_groups: Vec<CalendarGroup>,
 }
 
 impl<'de> Deserialize<'de> for Config {
@@ -45,6 +49,8 @@ impl<'de> Deserialize<'de> for Config {
             subscriptions: Vec<IcsSubscription>,
             #[serde(default)]
             calendar_colors: Vec<CalendarColorEntry>,
+            #[serde(default)]
+            calendar_groups: Vec<CalendarGroup>,
         }
         let raw = Raw::deserialize(deserializer)?;
         let mut servers = raw.servers;
@@ -58,6 +64,7 @@ impl<'de> Deserialize<'de> for Config {
             notifications: raw.notifications,
             subscriptions: raw.subscriptions,
             calendar_colors: raw.calendar_colors,
+            calendar_groups: raw.calendar_groups,
         })
     }
 }
@@ -109,6 +116,10 @@ pub struct DisplayConfig {
     /// `#RRGGBB` color used to accent event summaries in the terminal views.
     #[serde(default)]
     pub accent_color: Option<String>,
+    /// Calendars shown by default when no `+group`/`-group` filter is given.
+    /// An empty list means every synchronized calendar.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub displayed_calendars: Vec<String>,
 }
 
 impl Default for DisplayConfig {
@@ -118,6 +129,7 @@ impl Default for DisplayConfig {
             time_format: default_time_format(),
             color_scheme: default_color_scheme(),
             accent_color: None,
+            displayed_calendars: Vec::new(),
         }
     }
 }
@@ -150,8 +162,6 @@ pub struct CalendarsConfig {
     pub hide: Vec<String>,
     #[serde(default)]
     pub default: Option<String>,
-    #[serde(default)]
-    pub groups: Vec<CalendarGroup>,
 }
 
 impl CalendarsConfig {
@@ -201,6 +211,7 @@ impl Default for Config {
             notifications: NotificationsConfig::default(),
             subscriptions: Vec::new(),
             calendar_colors: Vec::new(),
+            calendar_groups: Vec::new(),
         }
     }
 }
@@ -226,6 +237,7 @@ impl Config {
             notifications: NotificationsConfig::default(),
             subscriptions: Vec::new(),
             calendar_colors: Vec::new(),
+            calendar_groups: Vec::new(),
         }
     }
 
@@ -401,8 +413,7 @@ impl Config {
             return all_names.to_vec();
         }
         if let Some(group) = self
-            .calendars
-            .groups
+            .calendar_groups
             .iter()
             .find(|group| group.name.eq_ignore_ascii_case(name))
         {
@@ -413,7 +424,20 @@ impl Config {
 
     /// The calendar names that should be shown with no command-line filters.
     pub fn default_calendar_names(&self, all_names: &[String]) -> Vec<String> {
-        if let Some(default) = &self.calendars.default {
+        if !self.display.displayed_calendars.is_empty() {
+            self.display
+                .displayed_calendars
+                .iter()
+                .cloned()
+                .filter(|name| {
+                    !self
+                        .calendars
+                        .hide
+                        .iter()
+                        .any(|hidden| hidden.eq_ignore_ascii_case(name))
+                })
+                .collect()
+        } else if let Some(default) = &self.calendars.default {
             self.group_members(default, all_names)
         } else if !self.calendars.show.is_empty() || !self.calendars.hide.is_empty() {
             self.calendars
