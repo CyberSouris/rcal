@@ -8,7 +8,7 @@ mod subscribe;
 
 use chrono::{Datelike, Days, Local, Months, NaiveDate, NaiveTime};
 use clap::{Parser, Subcommand};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::path::PathBuf;
 
@@ -54,6 +54,10 @@ enum Commands {
         /// Date to show (YYYY-MM-DD), defaults to today
         #[arg(short, long)]
         date: Option<String>,
+
+        /// Calendar filters: +group/-group (and calendar names)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        filters: Vec<String>,
     },
 
     /// Show this week's overview
@@ -73,6 +77,10 @@ enum Commands {
         /// Show all details of each event below the grid
         #[arg(long)]
         details: bool,
+
+        /// Calendar filters: +group/-group (and calendar names)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        filters: Vec<String>,
     },
 
     /// Show this month's overview
@@ -92,6 +100,10 @@ enum Commands {
         /// Show all details of each event below the grid
         #[arg(long)]
         details: bool,
+
+        /// Calendar filters: +group/-group (and calendar names)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        filters: Vec<String>,
     },
 
     /// Show events for a specific date (or a single event's details at a time)
@@ -102,6 +114,10 @@ enum Commands {
         /// Show all details of each event
         #[arg(long)]
         details: bool,
+
+        /// Calendar filters: +group/-group (and calendar names)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        filters: Vec<String>,
     },
 
     /// Import iCal (.ics) file
@@ -235,23 +251,23 @@ async fn main() -> anyhow::Result<()> {
     let global_details = cli.details;
     let force_sync = matches!(cli.command, Some(Commands::ForceSync));
     match cli.command {
-        Some(Commands::Today { details, next, date }) => {
+        Some(Commands::Today { details, next, date, filters }) => {
             let base = match date {
                 Some(d) => parse_date(&d)?,
                 None => Local::now().date_naive(),
             };
             let date = base + Days::new(next as u64);
-            show_day(date, None, details || global_details)
+            show_day(date, None, details || global_details, filters)
         }
-        Some(Commands::Week { date, next, agenda, details }) => {
-            show_week(date, next, agenda, details || global_details)
+        Some(Commands::Week { date, next, agenda, details, filters }) => {
+            show_week(date, next, agenda, details || global_details, filters)
         }
-        Some(Commands::Month { month, next, agenda, details }) => {
-            show_month(month, next, agenda, details || global_details)
+        Some(Commands::Month { month, next, agenda, details, filters }) => {
+            show_month(month, next, agenda, details || global_details, filters)
         }
-        Some(Commands::Show { date, details }) => {
+        Some(Commands::Show { date, details, filters }) => {
             let (date, time) = parse_show_arg(&date)?;
-            show_day(date, time, details || global_details)
+            show_day(date, time, details || global_details, filters)
         }
         Some(Commands::Import {
             file,
@@ -427,10 +443,16 @@ async fn main() -> anyhow::Result<()> {
 ///
 /// If `time` is given, only the single event whose schedule is closest to
 /// `time` is shown, rendered with full details.
-fn show_day(date: NaiveDate, time: Option<NaiveTime>, details: bool) -> anyhow::Result<()> {
+fn show_day(date: NaiveDate, time: Option<NaiveTime>, details: bool, filters: Vec<String>) -> anyhow::Result<()> {
     let db = db::Database::open()?;
+    let config = config::Config::load().ok();
+    let allowed = allowed_calendar_ids(config.as_ref(), &db, &filters);
     let stored = db.get_all_stored_events(None, None)?;
     let stored = expand_stored_events(stored, date, date);
+    let stored: Vec<db::StoredEvent> = stored
+        .into_iter()
+        .filter(|s| s.calendar_id.as_ref().map(|id| allowed.contains(id)).unwrap_or(true))
+        .collect();
 
     if let Some(time) = time {
         // Only events actually on this day may be matched by time of day.
@@ -516,6 +538,57 @@ fn colored_events<'a>(
         .collect()
 }
 
+/// Resolve which calendar IDs should be shown for a view, applying the
+/// configured default group plus any `+group`/`-group` command-line tokens.
+fn allowed_calendar_ids(
+    config: Option<&config::Config>,
+    db: &db::Database,
+    filters: &[String],
+) -> HashSet<String> {
+    let all_calendars = db.get_calendars().unwrap_or_default();
+    let all_names: Vec<String> = all_calendars.iter().map(|c| c.name.clone()).collect();
+
+    let group_members = |name: &str| -> Vec<String> {
+        if let Some(cfg) = config {
+            cfg.group_members(name, &all_names)
+        } else if name.eq_ignore_ascii_case("all") {
+            all_names.clone()
+        } else {
+            vec![name.to_string()]
+        }
+    };
+
+    let mut allowed: HashSet<String> = if let Some(cfg) = config {
+        cfg.default_calendar_names(&all_names)
+            .into_iter()
+            .collect()
+    } else {
+        all_names.iter().cloned().collect()
+    };
+
+    for token in filters {
+        if let Some(name) = token.strip_prefix('+') {
+            for member in group_members(name) {
+                allowed.insert(member);
+            }
+        } else if let Some(name) = token.strip_prefix('-') {
+            for member in group_members(name) {
+                allowed.remove(&member);
+            }
+        } else {
+            for member in group_members(token) {
+                allowed.insert(member);
+            }
+        }
+    }
+
+    all_calendars
+        .into_iter()
+        .filter(|calendar| allowed.contains(&calendar.name))
+        .map(|calendar| calendar.id)
+        .collect()
+}
+
 /// Expand recurring events into the occurrences that overlap `from..=to`.
 /// Non-recurring events are kept as they are; the renderers filter them by
 /// date. Metadata (`etag`, `calendar_id`) travels with every occurrence.
@@ -581,7 +654,7 @@ fn find_event_at_time<'a>(
 /// week by that many weeks. When `agenda` is set, a compact day-by-day
 /// listing is appended below the event grid; when `details` is set instead,
 /// each event is expanded with all of its fields.
-fn show_week(date: Option<String>, next: u8, agenda: bool, details: bool) -> anyhow::Result<()> {
+fn show_week(date: Option<String>, next: u8, agenda: bool, details: bool, filters: Vec<String>) -> anyhow::Result<()> {
     let db = db::Database::open()?;
     let start = match date {
         Some(d) => parse_date(&d)?,
@@ -590,8 +663,14 @@ fn show_week(date: Option<String>, next: u8, agenda: bool, details: bool) -> any
     let start = start + Days::new(7 * next as u64);
     let monday = start - Days::new(start.weekday().num_days_from_monday() as u64);
     let sunday = monday + Days::new(6);
+    let config = config::Config::load().ok();
+    let allowed = allowed_calendar_ids(config.as_ref(), &db, &filters);
     let all = db.get_all_stored_events(None, None)?;
     let all = expand_stored_events(all, monday, sunday);
+    let all: Vec<db::StoredEvent> = all
+        .into_iter()
+        .filter(|s| s.calendar_id.as_ref().map(|id| allowed.contains(id)).unwrap_or(true))
+        .collect();
     let colored = colored_events(&all, &calendar_meta_map(&db), accent_color().as_deref());
     print!("{}", display::render_week(&colored, start, agenda, details));
     Ok(())
@@ -606,6 +685,7 @@ fn show_month(
     next: u8,
     agenda: bool,
     details: bool,
+    filters: Vec<String>,
 ) -> anyhow::Result<()> {
     let db = db::Database::open()?;
     let month_date = match month {
@@ -616,8 +696,14 @@ fn show_month(
     let first_day = NaiveDate::from_ymd_opt(month_date.year(), month_date.month(), 1)
         .unwrap_or(month_date);
     let last_day = (first_day + Months::new(1)) - Days::new(1);
+    let config = config::Config::load().ok();
+    let allowed = allowed_calendar_ids(config.as_ref(), &db, &filters);
     let all = db.get_all_stored_events(None, None)?;
     let all = expand_stored_events(all, first_day, last_day);
+    let all: Vec<db::StoredEvent> = all
+        .into_iter()
+        .filter(|s| s.calendar_id.as_ref().map(|id| allowed.contains(id)).unwrap_or(true))
+        .collect();
     let colored = colored_events(&all, &calendar_meta_map(&db), accent_color().as_deref());
     print!(
         "{}",
@@ -634,9 +720,9 @@ fn run_default_view(details: bool) -> anyhow::Result<()> {
         .unwrap_or_else(|_| "today".to_string());
 
     match default_view.as_str() {
-        "today" => show_day(Local::now().date_naive(), None, details),
-        "week" => show_week(None, 0, false, details),
-        "month" => show_month(None, 0, false, details),
+        "today" => show_day(Local::now().date_naive(), None, details, Vec::new()),
+        "week" => show_week(None, 0, false, details, Vec::new()),
+        "month" => show_month(None, 0, false, details, Vec::new()),
         other => anyhow::bail!(
             "Invalid default_view '{}' in config; expected one of: today, week, month.",
             other

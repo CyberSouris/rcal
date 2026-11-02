@@ -134,12 +134,24 @@ fn default_color_scheme() -> String {
     "auto".to_string()
 }
 
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub struct CalendarGroup {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub members: Vec<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct CalendarsConfig {
     #[serde(default)]
     pub show: Vec<String>,
     #[serde(default)]
     pub hide: Vec<String>,
+    #[serde(default)]
+    pub default: Option<String>,
+    #[serde(default)]
+    pub groups: Vec<CalendarGroup>,
 }
 
 impl CalendarsConfig {
@@ -381,6 +393,50 @@ impl Config {
         true
     }
 
+    /// Members of the named group. The special group `all` expands to every
+    /// calendar supplied in `all_names`; an unknown name is treated as a
+    /// single calendar.
+    pub fn group_members(&self, name: &str, all_names: &[String]) -> Vec<String> {
+        if name.eq_ignore_ascii_case("all") {
+            return all_names.to_vec();
+        }
+        if let Some(group) = self
+            .calendars
+            .groups
+            .iter()
+            .find(|group| group.name.eq_ignore_ascii_case(name))
+        {
+            return group.members.clone();
+        }
+        vec![name.to_string()]
+    }
+
+    /// The calendar names that should be shown with no command-line filters.
+    pub fn default_calendar_names(&self, all_names: &[String]) -> Vec<String> {
+        if let Some(default) = &self.calendars.default {
+            self.group_members(default, all_names)
+        } else if !self.calendars.show.is_empty() || !self.calendars.hide.is_empty() {
+            self.calendars
+                .show
+                .clone()
+                .into_iter()
+                .chain(if self.calendars.show.is_empty() {
+                    all_names.to_vec().into_iter()
+                } else {
+                    Vec::new().into_iter()
+                })
+                .filter(|name| {
+                    !self
+                        .calendars
+                        .hide
+                        .iter()
+                        .any(|hidden| hidden.eq_ignore_ascii_case(name))
+                })
+                .collect()
+        } else {
+            all_names.to_vec()
+        }
+    }
     /// The user-assigned `#RRGGBB` color for the calendar called `name`, from
     /// the `[[calendar_colors]]` sections. `None` when the user has not
     /// configured a color for that calendar name.
