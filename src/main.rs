@@ -200,6 +200,9 @@ enum Commands {
     /// Add a CalDAV account
     AddAccount {
         /// CalDAV server URL (prompted if omitted)
+        ///
+        /// Nextcloud: use the CalDAV URL ending in /remote.php/dav/, e.g.
+        /// https://cloud.example.com/remote.php/dav/
         #[arg(short, long)]
         url: Option<String>,
 
@@ -208,6 +211,10 @@ enum Commands {
         username: Option<String>,
 
         /// Command that prints the password to stdout
+        ///
+        /// Optional: leave it empty to supply the password through the
+        /// RCAL_PASSWORD environment variable, or type it when 'rcal sync'
+        /// asks.
         #[arg(long)]
         password_command: Option<String>,
 
@@ -1082,9 +1089,15 @@ fn handle_add_account(
 
     let url = match url_flag {
         Some(u) => u,
-        None if interactive => prompt("CalDAV server URL", None)?
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| anyhow::anyhow!("Server URL is required"))?,
+        None if interactive => {
+            println!(
+                "Nextcloud: enter the CalDAV URL ending in /remote.php/dav/, e.g.\n\
+                 https://cloud.example.com/remote.php/dav/"
+            );
+            prompt("CalDAV server URL", None)?
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| anyhow::anyhow!("Server URL is required"))?
+        }
         None => anyhow::bail!("Missing required --url"),
     };
 
@@ -1098,7 +1111,13 @@ fn handle_add_account(
 
     let password_command = match password_command_flag {
         Some(c) if !c.trim().is_empty() => Some(c.trim().to_string()),
-        None if interactive => prompt("Password command (prints password to stdout)", None)?,
+        None if interactive => {
+            println!(
+                "Leave this empty to provide the password through the RCAL_PASSWORD\n\
+                 environment variable instead (or type it when 'rcal sync' asks)."
+            );
+            prompt("Password command (prints password to stdout)", None)?
+        }
         _ => None,
     };
 
@@ -1107,6 +1126,7 @@ fn handle_add_account(
     } else {
         config::Config::default()
     };
+    let has_password_command = password_command.is_some();
     if !config.add_server(url.clone(), username.clone(), password_command) {
         anyhow::bail!("A server with URL {} is already configured.", url);
     }
@@ -1120,11 +1140,13 @@ fn handle_add_account(
     println!();
     println!("Server:   {}", url);
     println!("Username: {}", username);
+    if has_password_command {
+        println!("Password: from password_command");
+    } else {
+        println!("Password: RCAL_PASSWORD environment variable, or prompted by 'rcal sync'");
+    }
     println!();
-    println!(
-        "Next: run 'rcal sync' to pull your calendars. The password will be taken from\n\
-         password_command, the RCAL_PASSWORD environment variable, or an interactive prompt."
-    );
+    println!("Next: run 'rcal sync' to pull your calendars.");
     Ok(())
 }
 
