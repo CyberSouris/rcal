@@ -387,6 +387,44 @@ ICS
     [[ "${output}" == *"Named Date"* ]]
 }
 
+@test "relative date keywords resolve for new and today" {
+    sandbox
+    run "${RCAL}" new --title "Tomorrow Event" --date tomorrow --time 09:00 </dev/null
+    [ "$status" -eq 0 ]
+
+    run "${RCAL}" today --date tomorrow
+    [ "$status" -eq 0 ]
+    [[ "${output}" == *"Tomorrow Event"* ]]
+
+    run "${RCAL}" today --date yesterday
+    [ "$status" -eq 0 ]
+    [[ "${output}" == *"No events today."* ]]
+
+    local expected_header
+    expected_header="$(date -d 'next friday' '+%A, %B %-d, %Y')"
+    run "${RCAL}" today --date "next friday"
+    [ "$status" -eq 0 ]
+    [[ "${output}" == *"${expected_header}"* ]]
+}
+
+@test "in N days and N days ago resolve relative to today" {
+    sandbox
+    run "${RCAL}" new --title "In Two Days" --date "in 2 days" --time 09:00 </dev/null
+    [ "$status" -eq 0 ]
+
+    local expected_header
+    expected_header="$(date -d '2 days' '+%A, %B %-d, %Y')"
+    run "${RCAL}" today --date "in 2 days"
+    [ "$status" -eq 0 ]
+    [[ "${output}" == *"${expected_header}"* ]]
+    [[ "${output}" == *"In Two Days"* ]]
+
+    expected_header="$(date -d '2 days ago' '+%A, %B %-d, %Y')"
+    run "${RCAL}" today --date "2 days ago"
+    [ "$status" -eq 0 ]
+    [[ "${output}" == *"${expected_header}"* ]]
+}
+
 @test "today --next advances by one day per occurrence" {
     sandbox
     run "${RCAL}" today --date 2024-01-15 --next --next

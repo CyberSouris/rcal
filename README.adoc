@@ -157,6 +157,10 @@ owns their calendar the next time you run `rcal sync`.
 `rcal search QUERY [--from DATE] [--to DATE]`:: Search events
 `rcal calendars`:: List calendars
 
+`DATE` arguments accept `YYYY-MM-DD` as well as natural-language expressions
+such as `today`, `tomorrow`, `next friday`, `last monday`, `next week`,
+`in 2 days`, and `2 days ago`.
+
 See `rcal --help` and the man page (`man ./man/rcal.1`) for full details.
 
 == Data locations
