@@ -26,3 +26,77 @@ sandbox() {
     export XDG_DATA_HOME="${BATS_TEST_TMPDIR}/data"
     unset RCAL_PASSWORD
 }
+
+# Path of the config file inside the current sandbox.
+config_file() {
+    printf '%s/rcal/config.toml' "${XDG_CONFIG_HOME}"
+}
+
+# Replace the sandbox config with the TOML read from stdin. The file is made
+# owner-only up front so the permission-tightening warning does not leak into
+# tests that only care about normal config parsing.
+write_config() {
+    local path
+    path="$(config_file)"
+    mkdir -p "$(dirname "${path}")"
+    cat > "${path}"
+    chmod 600 "${path}"
+}
+
+# Serve a directory over loopback HTTP for subscription tests. The OS picks a
+# free port, which is written to a file so the test can discover it. Sets
+# FEED_URL to <root>/calendar.ics and FEED_PORT to the chosen port.
+start_feed_server() {
+    local root="$1"
+    local portfile="${BATS_TEST_TMPDIR}/feed.port"
+    rm -f "${portfile}"
+    python3 - "${root}" "${portfile}" >"${BATS_TEST_TMPDIR}/feed.log" 2>&1 <<'PY' &
+import http.server
+import sys
+
+root, portfile = sys.argv[1], sys.argv[2]
+
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=root, **kwargs)
+
+    def log_message(self, *args):
+        pass
+
+
+server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+with open(portfile, "w") as handle:
+    handle.write(str(server.server_address[1]))
+server.serve_forever()
+PY
+    FEED_PID=$!
+
+    local _
+    for _ in $(seq 1 100); do
+        [[ -s "${portfile}" ]] && break
+        sleep 0.05
+    done
+    FEED_PORT="$(cat "${portfile}")"
+    for _ in $(seq 1 100); do
+        # Probe with fd 9: fd 3 belongs to bats itself.
+        if (exec 9<>"/dev/tcp/127.0.0.1/${FEED_PORT}") 2>/dev/null; then
+            break
+        fi
+        sleep 0.05
+    done
+    FEED_URL="http://127.0.0.1:${FEED_PORT}/calendar.ics"
+}
+
+# Stop the loopback feed server, if this test started one.
+stop_feed_server() {
+    if [[ -n "${FEED_PID:-}" ]]; then
+        kill "${FEED_PID}" 2>/dev/null || true
+        wait "${FEED_PID}" 2>/dev/null || true
+        FEED_PID=""
+    fi
+}
+
+teardown() {
+    stop_feed_server
+}
