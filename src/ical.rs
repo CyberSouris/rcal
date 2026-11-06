@@ -1194,5 +1194,153 @@ END:VCALENDAR\r\n";
         assert_eq!(nth_weekday_of_month(2026, 3, Weekday::Sun, -1).map(|d| d.day()), Some(29));
         assert_eq!(nth_weekday_of_month(2026, 9, Weekday::Fri, 2).map(|d| d.day()), Some(11));
         assert_eq!(nth_weekday_of_month(2026, 1, Weekday::Mon, 5), None);
+        assert_eq!(nth_weekday_of_month(2026, 1, Weekday::Mon, 0), None);
+        assert_eq!(nth_weekday_of_month(2026, 1, Weekday::Mon, 6), None);
+    }
+
+    #[test]
+    fn test_parse_ical_offset_variants() {
+        assert_eq!(parse_ical_offset("+0200"), Some(2 * 3600));
+        assert_eq!(parse_ical_offset("-0530"), Some(-(5 * 3600 + 30 * 60)));
+        // Optional seconds field.
+        assert_eq!(parse_ical_offset("+020030"), Some(2 * 3600 + 30));
+        // Missing sign, too short, non-digit, and non-ASCII inputs are invalid.
+        assert_eq!(parse_ical_offset("0200"), None);
+        assert_eq!(parse_ical_offset("+02"), None);
+        assert_eq!(parse_ical_offset("+0a00"), None);
+        assert_eq!(parse_ical_offset("+02é0"), None);
+    }
+
+    #[test]
+    fn test_parse_local_datetime_variants() {
+        assert_eq!(
+            parse_local_datetime("20240115T093000").unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 15)
+                .unwrap()
+                .and_hms_opt(9, 30, 0)
+                .unwrap()
+        );
+        assert_eq!(
+            parse_local_datetime("20240115").unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 15)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+        );
+        assert_eq!(parse_local_datetime("20240115T0930"), None);
+        assert_eq!(parse_local_datetime("20241340"), None);
+        assert_eq!(parse_local_datetime("nonsense"), None);
+    }
+
+    #[test]
+    fn test_parse_hms_offset_variants() {
+        assert_eq!(parse_hms_offset("5"), Some(5 * 3600));
+        assert_eq!(parse_hms_offset("5:30"), Some(5 * 3600 + 30 * 60));
+        assert_eq!(
+            parse_hms_offset("5:30:15"),
+            Some(5 * 3600 + 30 * 60 + 15)
+        );
+        assert_eq!(parse_hms_offset(""), None);
+        assert_eq!(parse_hms_offset("abc"), None);
+        // A malformed minute/second component degrades to zero.
+        assert_eq!(parse_hms_offset("5:xx"), Some(5 * 3600));
+    }
+
+    #[test]
+    fn test_fixed_offset_for_tzid_variants() {
+        assert_eq!(fixed_offset_for_tzid("utc"), Some(0));
+        assert_eq!(fixed_offset_for_tzid("Etc/Universal"), Some(0));
+        assert_eq!(fixed_offset_for_tzid("UTC+2"), Some(2 * 3600));
+        assert_eq!(fixed_offset_for_tzid("UTC-05:30"), Some(-(5 * 3600 + 30 * 60)));
+        // POSIX Etc/GMT signs are inverted relative to UTC offsets.
+        assert_eq!(fixed_offset_for_tzid("Etc/GMT-3"), Some(3 * 3600));
+        assert_eq!(fixed_offset_for_tzid("Etc/GMT+3"), Some(-3 * 3600));
+        assert_eq!(fixed_offset_for_tzid("Etc/GMT-2:00"), Some(2 * 3600));
+        assert_eq!(fixed_offset_for_tzid("Europe/Prague"), None);
+    }
+
+    #[test]
+    fn test_parse_duration_signed_and_edge_cases() {
+        assert_eq!(parse_ical_duration("+PT1H"), Some(chrono::Duration::hours(1)));
+        assert_eq!(parse_ical_duration("-PT1H"), Some(chrono::Duration::hours(-1)));
+        assert_eq!(parse_ical_duration("-P1D"), Some(chrono::Duration::days(-1)));
+        assert_eq!(
+            parse_ical_duration("PT1H30M15S"),
+            Some(chrono::Duration::hours(1) + chrono::Duration::minutes(30) + chrono::Duration::seconds(15))
+        );
+        assert_eq!(parse_ical_duration("PT1S"), Some(chrono::Duration::seconds(1)));
+        assert_eq!(parse_ical_duration("1D"), None);
+        assert_eq!(parse_ical_duration("P-1D"), None);
+        assert_eq!(parse_ical_duration("PT1H2D"), None);
+        assert_eq!(parse_ical_duration("PT1X"), None);
+        assert_eq!(parse_ical_duration("P99999999999999999999D"), None);
+    }
+
+    #[test]
+    fn test_parse_byday_variants() {
+        assert_eq!(parse_byday("MO"), Some((1, Weekday::Mon)));
+        assert_eq!(parse_byday("-1SU"), Some((-1, Weekday::Sun)));
+        assert_eq!(parse_byday("2fr"), Some((2, Weekday::Fri)));
+        assert_eq!(parse_byday("0SU"), Some((-1, Weekday::Sun)));
+        assert_eq!(parse_byday("XX"), None);
+        assert_eq!(parse_byday("1XX"), None);
+        assert_eq!(parse_byday("-1"), None);
+    }
+
+    #[test]
+    fn test_parse_ical_datetime_rejects_unsupported_formats() {
+        assert!(parse_ical_datetime("20240115T0930").is_err());
+        assert!(parse_ical_datetime("20240230").is_err());
+        assert!(parse_ical_datetime("").is_err());
+    }
+
+    #[test]
+    fn test_export_all_day_event_with_exdates() {
+        let event = CalendarEvent {
+            uid: "all-day@example.com".to_string(),
+            summary: "Conference".to_string(),
+            description: None,
+            location: None,
+            url: None,
+            dtstart: Some(parse_ical_datetime("20240506").unwrap()),
+            dtend: Some(parse_ical_datetime("20240508").unwrap()),
+            all_day: true,
+            status: None,
+            recurrence: Some("FREQ=DAILY;COUNT=3".to_string()),
+            exdates: vec![parse_ical_datetime("20240507").unwrap()],
+        };
+
+        let ical = export_ical(&event);
+        assert!(ical.contains("DTSTART;VALUE=DATE:20240506"), "{ical}");
+        assert!(ical.contains("DTEND;VALUE=DATE:20240508"), "{ical}");
+        assert!(ical.contains("EXDATE;VALUE=DATE:20240507"), "{ical}");
+
+        // A timed event keeps the datetime EXDATE form.
+        let timed = CalendarEvent {
+            all_day: false,
+            dtstart: Some(parse_ical_datetime("20240506T090000Z").unwrap()),
+            dtend: Some(parse_ical_datetime("20240506T100000Z").unwrap()),
+            exdates: vec![parse_ical_datetime("20240507T090000Z").unwrap()],
+            ..event
+        };
+        let ical = export_ical(&timed);
+        assert!(ical.contains("EXDATE:20240507T090000Z"), "{ical}");
+    }
+
+    #[test]
+    fn test_parse_ical_file_rejects_oversized_file() {
+        let path = std::env::temp_dir().join(format!(
+            "rcal-oversized-{}.ics",
+            uuid::Uuid::new_v4()
+        ));
+        let file = File::create(&path).unwrap();
+        file.set_len(MAX_ICAL_FILE_BYTES as u64 + 1).unwrap();
+        drop(file);
+
+        let err = parse_ical_file(&path).unwrap_err().to_string();
+        assert!(err.contains("exceeding"), "{err}");
+        assert!(err.contains("64 MiB"), "{err}");
+
+        std::fs::remove_file(&path).ok();
     }
 }
