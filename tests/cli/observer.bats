@@ -400,8 +400,10 @@ ICS
     [ "$status" -eq 0 ]
     [[ "${output}" == *"No events today."* ]]
 
+    # rcal renders dates with the space-padded `%e` day field, so mirror that
+    # here (`%e`) instead of GNU date's unpadded `%-d`.
     local expected_header
-    expected_header="$(date -d 'next friday' '+%A, %B %-d, %Y')"
+    expected_header="$(date -d 'next friday' '+%A, %B %e, %Y')"
     run "${RCAL}" today --date "next friday"
     [ "$status" -eq 0 ]
     [[ "${output}" == *"${expected_header}"* ]]
@@ -413,13 +415,13 @@ ICS
     [ "$status" -eq 0 ]
 
     local expected_header
-    expected_header="$(date -d '2 days' '+%A, %B %-d, %Y')"
+    expected_header="$(date -d '2 days' '+%A, %B %e, %Y')"
     run "${RCAL}" today --date "in 2 days"
     [ "$status" -eq 0 ]
     [[ "${output}" == *"${expected_header}"* ]]
     [[ "${output}" == *"In Two Days"* ]]
 
-    expected_header="$(date -d '2 days ago' '+%A, %B %-d, %Y')"
+    expected_header="$(date -d '2 days ago' '+%A, %B %e, %Y')"
     run "${RCAL}" today --date "2 days ago"
     [ "$status" -eq 0 ]
     [[ "${output}" == *"${expected_header}"* ]]

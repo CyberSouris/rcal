@@ -24,6 +24,10 @@ export RCAL="$(repo_root)/target/debug/rcal"
 sandbox() {
     export XDG_CONFIG_HOME="${BATS_TEST_TMPDIR}/cfg"
     export XDG_DATA_HOME="${BATS_TEST_TMPDIR}/data"
+    # rcal always renders English month/weekday names; force the same locale
+    # for any `date` used to build expected values so the suite is independent
+    # of the developer's/runner's locale.
+    export LC_ALL=C
     unset RCAL_PASSWORD
 }
 
