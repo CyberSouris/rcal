@@ -1725,4 +1725,120 @@ mod tests {
         assert!(output.contains(summary), "{output}");
         assert!(!output.contains('…'), "{output}");
     }
+
+    #[test]
+    fn test_truncate_plain_boundaries() {
+        assert_eq!(truncate_plain("hello", 10), "hello");
+        assert_eq!(truncate_plain("hello", 5), "hello");
+        assert_eq!(truncate_plain("hello", 4), "hel…");
+        // A zero budget yields nothing, and a one-char budget is just the
+        // ellipsis; neither may panic.
+        assert_eq!(truncate_plain("hello", 0), "");
+        assert_eq!(truncate_plain("hello", 1), "…");
+    }
+
+    #[test]
+    fn test_month_event_prefix_variants() {
+        let start = Local.with_ymd_and_hms(2024, 1, 15, 9, 5, 0).single().unwrap();
+        let timed = local_event("Meeting", start, start + chrono::Duration::hours(1));
+        assert_eq!(month_event_prefix(&timed), "Jan 15 09:05");
+
+        let mut all_day = timed.clone();
+        all_day.all_day = true;
+        assert_eq!(month_event_prefix(&all_day), "Jan 15 all-day");
+
+        // Events without DTSTART still have a stable placeholder prefix.
+        let missing = make_event("No start", None, None);
+        assert_eq!(month_event_prefix(&missing), "        --:--");
+        let mut missing_all_day = missing;
+        missing_all_day.all_day = true;
+        assert_eq!(month_event_prefix(&missing_all_day), "        all-day");
+    }
+
+    #[test]
+    fn test_event_on_date_without_start_never_matches() {
+        let event = make_event("No start", None, None);
+        assert!(!event_on_date(
+            &event,
+            NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_all_day_event_with_nonpositive_end_only_matches_start() {
+        let start = Utc.from_utc_datetime(
+            &NaiveDate::from_ymd_opt(2024, 1, 15)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap(),
+        );
+        // A malformed end on or before the start must not hide the event.
+        for end in [
+            start,
+            start - chrono::Duration::days(1),
+        ] {
+            let mut event = make_event("Holiday", Some(start), Some(end));
+            event.all_day = true;
+            assert!(event_on_date(
+                &event,
+                NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()
+            ));
+            assert!(!event_on_date(
+                &event,
+                NaiveDate::from_ymd_opt(2024, 1, 16).unwrap()
+            ));
+        }
+    }
+
+    #[test]
+    fn test_format_event_time_start_only_and_missing() {
+        let start = Local.with_ymd_and_hms(2024, 1, 15, 9, 5, 0).single().unwrap();
+
+        let timed = make_event("Timed", Some(start.with_timezone(&Utc)), None);
+        assert_eq!(format_event_time(&timed), "09:05");
+
+        let mut all_day = timed;
+        all_day.all_day = true;
+        assert_eq!(format_event_time(&all_day), "All day");
+
+        let missing = make_event("No start", None, None);
+        assert_eq!(format_event_time(&missing), "No time");
+    }
+
+    #[test]
+    fn test_render_month_marks_today() {
+        let today = Local::now().date_naive();
+        let month = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap();
+        let output = render_month(&[], month, false, false, 80);
+        assert!(
+            output.contains(&format!("[{}]", today.day())),
+            "today's cell must be bracketed:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_month_agenda_labels_today() {
+        let today = Local::now().date_naive();
+        let month = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap();
+        let start = Local
+            .with_ymd_and_hms(today.year(), today.month(), today.day(), 9, 0, 0)
+            .single()
+            .unwrap();
+        let events = vec![local_event("Standup", start, start + chrono::Duration::hours(1))];
+
+        let output = render_month(&colored(events, None), month, true, false, 80);
+        assert!(output.contains("Today ("), "{output}");
+        assert!(output.contains("Standup"), "{output}");
+    }
+
+    #[test]
+    fn test_wrap_cell_overflow_ellipsis_respects_width() {
+        // 34 chars hard-split into 14-char chunks; truncating to two lines
+        // replaces the last character of the second line with the ellipsis.
+        let lines = wrap_cell("Supercalifragilisticexpialidocious", 14, 2);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1].chars().count(), 14);
+        assert!(lines[1].ends_with('…'));
+        assert!(lines.iter().all(|line| line.chars().count() <= 14));
+    }
 }
