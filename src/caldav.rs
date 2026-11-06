@@ -1731,4 +1731,148 @@ END:VCALENDAR";
         assert_eq!(summary.total_added, 1);
         assert_eq!(db.get_events_for_calendar(&work).unwrap().len(), 1);
     }
+
+    #[test]
+    fn test_calendar_collections_falls_back_to_href_segment() {
+        let xml = r#"<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:response>
+    <d:href>/p/unnamed/</d:href>
+    <d:propstat>
+      <d:prop><d:resourcetype><d:collection/><c:calendar/></d:resourcetype></d:prop>
+    </d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>https://evil.example/secret/</d:href>
+    <d:propstat>
+      <d:prop><d:resourcetype><d:collection/><c:calendar/></d:resourcetype></d:prop>
+    </d:propstat>
+  </d:response>
+</d:multistatus>"#;
+        let doc = Document::parse(xml).unwrap();
+
+        // The nameless calendar uses its last href segment, and the href
+        // pointing at a different host is skipped rather than queried.
+        let cals = calendar_collections_from(&doc, "https://example.com/p/").unwrap();
+        assert_eq!(cals.len(), 1);
+        assert_eq!(cals[0].href, "https://example.com/p/unnamed/");
+        assert_eq!(cals[0].name, "unnamed");
+    }
+
+    #[tokio::test]
+    async fn test_discover_calendars_errors_when_none_found() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("PROPFIND"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(
+                r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"></d:multistatus>"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let client = CalDavClient::from_parts(&server.uri(), "alice", "pw").unwrap();
+        let err = client.discover_calendars().await.unwrap_err().to_string();
+        assert!(err.contains("No CalDAV calendars found"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_put_event_reports_failure_status_and_body() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/p/work/bad.ics"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("server said no"))
+            .mount(&server)
+            .await;
+
+        let client = CalDavClient::from_parts(&server.uri(), "alice", "pw").unwrap();
+        let cal = RemoteCalendar {
+            href: format!("{}/p/work/", server.uri()),
+            name: "Work".into(),
+        };
+        let err = client
+            .put_event(&cal, "bad.ics", "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("returned status 500"), "{err}");
+        assert!(err.contains("server said no"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_sync_refreshes_etag_when_payload_is_identical() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let ical = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:same-1\nSUMMARY:Standup\nDTSTART:20240115T090000Z\nDTEND:20240115T100000Z\nEND:VEVENT\nEND:VCALENDAR";
+
+        let server = MockServer::start().await;
+        let work = format!("{}/p/work/", server.uri());
+        Mock::given(method("REPORT"))
+            .and(path("/p/work/"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(report_xml(
+                "/p/work/same-1.ics",
+                "\"2\"",
+                ical,
+            )))
+            .mount(&server)
+            .await;
+
+        let client = CalDavClient::from_parts(&server.uri(), "alice", "pw").unwrap();
+        let db = Database::open_from(std::path::Path::new(":memory:")).unwrap();
+        db.insert_calendar(&work, "Work").unwrap();
+        let local = parse_ical_text(ical).unwrap().events[0].clone();
+        db.insert_event(&local, Some(&work), Some(ical), Some("\"1\""))
+            .unwrap();
+
+        let cals = vec![RemoteCalendar { href: work.clone(), name: "Work".into() }];
+        let summary = client.sync(&db, &cals).await.unwrap();
+        // The etag moved but the payload did not: not an update, yet the new
+        // etag must still be recorded.
+        assert_eq!(summary.total_unchanged, 1);
+        assert_eq!(summary.total_updated, 0);
+        assert_eq!(
+            db.get_events_for_calendar(&work).unwrap()[0].etag.as_deref(),
+            Some("\"2\"")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sync_updates_event_when_payload_changes() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let old_ical = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:changed-1\r\nSUMMARY:Old title\r\nDTSTART:20240115T090000Z\r\nDTEND:20240115T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let new_ical = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:changed-1\r\nSUMMARY:New title\r\nDTSTART:20240115T090000Z\r\nDTEND:20240115T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+        let server = MockServer::start().await;
+        let work = format!("{}/p/work/", server.uri());
+        Mock::given(method("REPORT"))
+            .and(path("/p/work/"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(report_xml(
+                "/p/work/changed-1.ics",
+                "\"2\"",
+                new_ical,
+            )))
+            .mount(&server)
+            .await;
+
+        let client = CalDavClient::from_parts(&server.uri(), "alice", "pw").unwrap();
+        let db = Database::open_from(std::path::Path::new(":memory:")).unwrap();
+        db.insert_calendar(&work, "Work").unwrap();
+        let local = parse_ical_text(old_ical).unwrap().events[0].clone();
+        db.insert_event(&local, Some(&work), Some(old_ical), Some("\"1\""))
+            .unwrap();
+
+        let cals = vec![RemoteCalendar { href: work.clone(), name: "Work".into() }];
+        let summary = client.sync(&db, &cals).await.unwrap();
+        assert_eq!(summary.total_updated, 1);
+        let stored = db.get_events_for_calendar(&work).unwrap();
+        assert_eq!(stored[0].event.summary, "New title");
+        assert_eq!(stored[0].etag.as_deref(), Some("\"2\""));
+    }
 }
