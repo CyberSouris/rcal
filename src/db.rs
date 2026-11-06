@@ -1347,4 +1347,143 @@ mod tests {
         assert_eq!(stored.len(), 2);
         assert!(stored.iter().any(|s| s.event.uid == "uid-undated"));
     }
+
+    #[test]
+    fn test_get_all_events_with_single_sided_range() {
+        let db = test_db();
+        db.insert_event(
+            &event("uid-jan", "Jan Event", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0)),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        db.insert_event(
+            &event("uid-feb", "Feb Event", dt(2024, 2, 15, 9, 0), dt(2024, 2, 15, 10, 0)),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Only `from`: both events are at or after 1 February.
+        let from_only = db.get_all_events(Some(dt(2024, 2, 1, 0, 0)), None).unwrap();
+        assert_eq!(from_only.len(), 1);
+        assert_eq!(from_only[0].summary, "Feb Event");
+
+        // Only `to`: only the January event is at or before 31 January.
+        let to_only = db.get_all_events(None, Some(dt(2024, 1, 31, 23, 59))).unwrap();
+        assert_eq!(to_only.len(), 1);
+        assert_eq!(to_only[0].summary, "Jan Event");
+
+        // Neither bound returns everything, ordered by start.
+        let all = db.get_all_events(None, None).unwrap();
+        assert_eq!(
+            all.iter().map(|event| event.summary.as_str()).collect::<Vec<_>>(),
+            vec!["Jan Event", "Feb Event"]
+        );
+    }
+
+    #[test]
+    fn test_get_all_stored_events_includes_sync_metadata() {
+        let db = test_db();
+        db.insert_calendar("cal-a", "Alpha").unwrap();
+        db.insert_event(
+            &event("uid-synced", "Synced", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0)),
+            Some("cal-a"),
+            Some("BEGIN:VCALENDAR"),
+            Some("etag-1"),
+        )
+        .unwrap();
+        db.insert_event(
+            &event("uid-local", "Local", dt(2024, 2, 15, 9, 0), dt(2024, 2, 15, 10, 0)),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let stored = db
+            .get_all_stored_events(Some(dt(2024, 1, 1, 0, 0)), Some(dt(2024, 12, 31, 23, 59)))
+            .unwrap();
+        assert_eq!(stored.len(), 2);
+        let synced = stored.iter().find(|s| s.event.uid == "uid-synced").unwrap();
+        assert_eq!(synced.calendar_id.as_deref(), Some("cal-a"));
+        assert_eq!(synced.etag.as_deref(), Some("etag-1"));
+        let local = stored.iter().find(|s| s.event.uid == "uid-local").unwrap();
+        assert_eq!(local.calendar_id, None);
+        assert_eq!(local.etag, None);
+
+        // A one-sided range still filters by start.
+        let january = db
+            .get_all_stored_events(None, Some(dt(2024, 1, 31, 23, 59)))
+            .unwrap();
+        assert_eq!(january.len(), 1);
+        assert_eq!(january[0].event.uid, "uid-synced");
+    }
+
+    #[test]
+    fn test_set_sync_metadata_and_get_ical_data() {
+        let db = test_db();
+        db.insert_calendar("cal-a", "Alpha").unwrap();
+        db.insert_event(
+            &event("uid-sync", "Synced", dt(2024, 1, 15, 9, 0), dt(2024, 1, 15, 10, 0)),
+            Some("cal-a"),
+            Some("old-payload"),
+            Some("etag-old"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            db.get_ical_data("cal-a", "uid-sync").unwrap().as_deref(),
+            Some("old-payload")
+        );
+
+        db.set_sync_metadata("uid-sync", "cal-a", Some("etag-new"), Some("new-payload"))
+            .unwrap();
+        assert_eq!(
+            db.get_ical_data("cal-a", "uid-sync").unwrap().as_deref(),
+            Some("new-payload")
+        );
+        let stored = db.get_events_for_calendar("cal-a").unwrap();
+        assert_eq!(stored[0].etag.as_deref(), Some("etag-new"));
+
+        // Unknown calendars/events simply return no payload.
+        assert_eq!(db.get_ical_data("cal-a", "uid-missing").unwrap(), None);
+        assert_eq!(db.get_ical_data("cal-other", "uid-sync").unwrap(), None);
+        // Updating a nonexistent event is a no-op rather than an error.
+        db.set_sync_metadata("uid-missing", "cal-a", None, None)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_is_safe_identifier() {
+        assert!(is_safe_identifier("events"));
+        assert!(is_safe_identifier("Events2"));
+        assert!(is_safe_identifier("a_b9"));
+        assert!(!is_safe_identifier(""));
+        assert!(!is_safe_identifier("9lives"));
+        assert!(!is_safe_identifier("a-b"));
+        assert!(!is_safe_identifier("a b"));
+        assert!(!is_safe_identifier("_private"));
+        assert!(!is_safe_identifier("événement"));
+    }
+
+    #[test]
+    fn test_encode_and_decode_exdates() {
+        let first = dt(2024, 1, 15, 9, 0);
+        let second = dt(2024, 1, 22, 9, 0);
+        assert_eq!(encode_exdates(&[]), None);
+        let encoded = encode_exdates(&[first, second]).unwrap();
+        assert!(encoded.contains(','));
+        assert_eq!(decode_exdates(Some(encoded)), vec![first, second]);
+
+        assert!(decode_exdates(None).is_empty());
+        assert!(decode_exdates(Some(String::new())).is_empty());
+        // Malformed entries are skipped rather than failing the whole row.
+        assert_eq!(
+            decode_exdates(Some(format!("garbage,{}", first.to_rfc3339()))),
+            vec![first]
+        );
+    }
 }
