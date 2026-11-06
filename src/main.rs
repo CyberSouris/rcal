@@ -2304,4 +2304,289 @@ mod tests {
         assert_eq!(colored[0].color.as_deref(), Some("#00ff00"));
         assert_eq!(colored[0].calendar, None);
     }
+
+    // --- calendar selection ------------------------------------------------
+
+    fn mem_db() -> db::Database {
+        db::Database::open_from(std::path::Path::new(":memory:")).unwrap()
+    }
+
+    #[test]
+    fn test_allowed_calendar_ids_defaults_and_filters() {
+        let db = mem_db();
+        db.insert_calendar("id-work", "Work").unwrap();
+        db.insert_calendar("id-home", "Home").unwrap();
+        db.insert_calendar("id-holidays", "Holidays").unwrap();
+
+        let ids = |allowed: HashSet<String>| -> Vec<String> {
+            let mut ids: Vec<String> = allowed.into_iter().collect();
+            ids.sort();
+            ids
+        };
+
+        assert_eq!(
+            ids(allowed_calendar_ids(None, &db, &[])),
+            vec!["id-holidays", "id-home", "id-work"]
+        );
+        // Without a config every calendar is already allowed, so "+Name"
+        // cannot widen the set any further.
+        assert_eq!(
+            ids(allowed_calendar_ids(None, &db, &["+Work".to_string()])),
+            vec!["id-holidays", "id-home", "id-work"]
+        );
+        assert_eq!(
+            ids(allowed_calendar_ids(
+                None,
+                &db,
+                &["all".to_string(), "-Home".to_string()]
+            )),
+            vec!["id-holidays", "id-work"]
+        );
+
+        // A config display list narrows the default set; filters add to it.
+        let mut config = config::Config::default();
+        config.display.displayed_calendars = vec!["Home".to_string()];
+        assert_eq!(
+            ids(allowed_calendar_ids(Some(&config), &db, &[])),
+            vec!["id-home"]
+        );
+
+        let mut narrowed = config::Config::default();
+        narrowed.display.displayed_calendars = vec!["Home".to_string()];
+        assert_eq!(
+            ids(allowed_calendar_ids(
+                Some(&narrowed),
+                &db,
+                &["+Work".to_string()]
+            )),
+            vec!["id-home", "id-work"]
+        );
+
+        config.calendar_groups.push(config::CalendarGroup {
+            name: "Team".to_string(),
+            members: vec!["Work".to_string(), "Holidays".to_string()],
+        });
+        assert_eq!(
+            ids(allowed_calendar_ids(
+                Some(&config),
+                &db,
+                &["+team".to_string()]
+            )),
+            vec!["id-holidays", "id-home", "id-work"]
+        );
+
+        // An unknown filter name simply matches no calendar.
+        assert_eq!(
+            ids(allowed_calendar_ids(None, &db, &["Missing".to_string()])),
+            vec!["id-holidays", "id-home", "id-work"]
+        );
+    }
+
+    #[test]
+    fn test_resolve_target_calendar_noninteractive() {
+        let cals = vec![cal("http://x/work/", "Work"), cal("http://x/home/", "Home")];
+
+        assert_eq!(
+            resolve_target_calendar(&cals, Some("Home".into()), false, None).unwrap(),
+            Some("http://x/home/".to_string())
+        );
+        assert_eq!(
+            resolve_target_calendar(&cals, Some("http://x/work/".into()), false, None).unwrap(),
+            Some("http://x/work/".to_string())
+        );
+        let err = resolve_target_calendar(&cals, Some("Nope".into()), false, None).unwrap_err();
+        // The available names are printed to stdout; the error names the
+        // unknown selection and points at the flag.
+        assert!(err.to_string().contains("Unknown calendar 'Nope'"));
+        assert!(err.to_string().contains("--calendar"));
+
+        // No calendars configured: store the event without one.
+        assert_eq!(
+            resolve_target_calendar(&[], None, false, None).unwrap(),
+            None
+        );
+        // Non-interactive default is the first calendar.
+        assert_eq!(
+            resolve_target_calendar(&cals, None, false, None).unwrap(),
+            Some("http://x/work/".to_string())
+        );
+    }
+
+    // --- new-event field resolution ---------------------------------------
+
+    #[test]
+    fn test_resolve_event_title_and_date() {
+        assert_eq!(
+            resolve_event_title(Some("Lunch".into()), false).unwrap(),
+            "Lunch"
+        );
+        assert!(resolve_event_title(Some("   ".into()), false).is_err());
+        assert!(resolve_event_title(None, false).is_err());
+
+        assert_eq!(
+            resolve_event_date(Some("2024-02-03".into()), false).unwrap(),
+            test_date("2024-02-03")
+        );
+        assert_eq!(
+            resolve_event_date(None, false).unwrap(),
+            Local::now().date_naive()
+        );
+    }
+
+    #[test]
+    fn test_resolve_all_day_time_duration_and_optional_fields() {
+        assert!(resolve_all_day(true, &None, false).unwrap());
+        assert!(!resolve_all_day(false, &Some("09:00".into()), false).unwrap());
+        assert!(!resolve_all_day(false, &None, false).unwrap());
+
+        assert_eq!(
+            resolve_event_time(Some("07:45".into()), false).unwrap(),
+            NaiveTime::from_hms_opt(7, 45, 0).unwrap()
+        );
+        assert_eq!(
+            resolve_event_time(None, false).unwrap(),
+            NaiveTime::from_hms_opt(9, 0, 0).unwrap()
+        );
+        assert!(resolve_event_time(Some("bad".into()), false).is_err());
+
+        assert_eq!(
+            resolve_event_duration(Some(90), false).unwrap(),
+            chrono::Duration::minutes(90)
+        );
+        assert_eq!(
+            resolve_event_duration(None, false).unwrap(),
+            chrono::Duration::minutes(60)
+        );
+
+        assert_eq!(
+            resolve_optional_field(Some("Room 1".into()), "Location", false).unwrap(),
+            Some("Room 1".to_string())
+        );
+        assert_eq!(
+            resolve_optional_field(None, "Location", false).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn test_resolve_event_times_all_day_and_timed() {
+        let date = test_date("2024-03-10");
+
+        let (start, end) = resolve_event_times(date, true, None, None, false).unwrap();
+        assert_eq!(start.date_naive(), date);
+        assert_eq!(end - start, chrono::Duration::days(1));
+
+        let (start, end) =
+            resolve_event_times(date, false, Some("09:30".into()), Some(45), false).unwrap();
+        assert_eq!(end - start, chrono::Duration::minutes(45));
+        assert_eq!(
+            start.with_timezone(&Local).time(),
+            NaiveTime::from_hms_opt(9, 30, 0).unwrap()
+        );
+        assert_eq!(
+            end.with_timezone(&Local).time(),
+            NaiveTime::from_hms_opt(10, 15, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_apply_delete_calendar_filter() {
+        let d = test_date("2024-01-15");
+        let mut stored = vec![
+            stored_event("local", "Local", d, 9, 0, None, None),
+            stored_event("work", "Work", d, 10, 0, Some("http://x/work/"), Some("\"1\"")),
+            stored_event("home", "Home", d, 11, 0, Some("http://x/home/"), Some("\"2\"")),
+        ];
+
+        let scope = apply_delete_calendar_filter(&mut stored, DeleteCalendarFilter::None);
+        assert_eq!(scope, "");
+        assert_eq!(stored.len(), 3);
+
+        let scope = apply_delete_calendar_filter(&mut stored, DeleteCalendarFilter::Local);
+        assert_eq!(scope, " in calendar 'local'");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].event.uid, "local");
+
+        let mut stored = vec![
+            stored_event("local", "Local", d, 9, 0, None, None),
+            stored_event("work", "Work", d, 10, 0, Some("http://x/work/"), Some("\"1\"")),
+        ];
+        let scope = apply_delete_calendar_filter(
+            &mut stored,
+            DeleteCalendarFilter::Calendar {
+                id: "http://x/work/".to_string(),
+                name: "Work\x1b[2J".to_string(),
+            },
+        );
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].event.uid, "work");
+        assert!(!scope.contains('\x1b'));
+        assert!(scope.contains("Work"));
+    }
+
+    // --- date parsing helpers ---------------------------------------------
+
+    #[test]
+    fn test_natural_date_expr_rejects_structured_and_at_expressions() {
+        assert_eq!(natural_date_expr("tomorrow"), Some("tomorrow"));
+        assert_eq!(natural_date_expr("in 2 days"), Some("2 days"));
+        // Structured dates without letters and explicit @time suffixes are
+        // deliberately left to the strict parser.
+        assert_eq!(natural_date_expr("2024/01/15"), None);
+        assert_eq!(natural_date_expr("15-01-2024"), None);
+        assert_eq!(natural_date_expr("2024-01-15@09:00"), None);
+    }
+
+    #[test]
+    fn test_parsed_datetime_date_variants() {
+        use parse_datetime::ParsedDateTime;
+
+        let in_range: jiff::Zoned = "2024-05-06T12:00:00Z[UTC]".parse().unwrap();
+        assert_eq!(
+            parsed_datetime_date(ParsedDateTime::InRange(in_range)),
+            Some(test_date("2024-05-06"))
+        );
+
+        let extended = parse_datetime::ExtendedDateTime {
+            year: 10_000,
+            month: 2,
+            day: 29,
+            hour: 0,
+            minute: 0,
+            second: 0,
+            nanosecond: 0,
+            offset_seconds: 0,
+        };
+        assert_eq!(
+            parsed_datetime_date(ParsedDateTime::Extended(extended)),
+            Some(NaiveDate::from_ymd_opt(10_000, 2, 29).unwrap())
+        );
+
+        // A year that does not fit in `i32` cannot become a NaiveDate.
+        let too_large = parse_datetime::ExtendedDateTime {
+            year: 3_000_000_000,
+            month: 1,
+            day: 1,
+            hour: 0,
+            minute: 0,
+            second: 0,
+            nanosecond: 0,
+            offset_seconds: 0,
+        };
+        assert_eq!(parsed_datetime_date(ParsedDateTime::Extended(too_large)), None);
+    }
+
+    #[test]
+    fn test_color_swatch_contrast_and_invalid_values() {
+        // Dark backgrounds get white text, light backgrounds black text.
+        assert!(color_swatch(Some("#000000")).contains("\x1b[37m"));
+        assert!(color_swatch(Some("#ffffff")).contains("\x1b[30m"));
+        assert!(color_swatch(Some("#ff8800")).starts_with("\x1b[48;2;255;136;0m"));
+
+        // Missing, wrong-length, or non-hex colors degrade to plain padding.
+        assert_eq!(color_swatch(None), "  ");
+        assert_eq!(color_swatch(Some("#fff")), "  ");
+        assert_eq!(color_swatch(Some("ff8800")), "  ");
+        assert_eq!(color_swatch(Some("#zz8800")), "  ");
+    }
 }
