@@ -264,13 +264,93 @@ END:VCALENDAR";
     }
 
     #[test]
+    fn test_truncate_short_and_zero_limits() {
+        // Strings at or under the limit are returned unchanged.
+        assert_eq!(truncate("short", 300), "short");
+        assert_eq!(truncate("exact", 5), "exact");
+        // A zero limit keeps no characters but never panics.
+        assert_eq!(truncate("abc", 0), "...");
+        assert_eq!(truncate("é", 0), "...");
+    }
+
+    #[test]
     fn test_validate_scheme() {
         assert!(validate_scheme("https://example.com/cal.ics").is_ok());
         assert!(validate_scheme("http://127.0.0.1:5232/cal.ics").is_ok());
         assert!(validate_scheme("http://localhost:5232/cal.ics").is_ok());
+        assert!(validate_scheme("http://[::1]:5232/cal.ics").is_ok());
         assert!(validate_scheme("http://example.com/cal.ics").is_err());
+        assert!(validate_scheme("http://[2001:db8::1]/cal.ics").is_err());
         assert!(validate_scheme("ftp://example.com/cal.ics").is_err());
         assert!(validate_scheme("not a url").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_refresh_subscription_rejects_plaintext_remote_url() {
+        let db = test_db();
+        let err = refresh_subscription(&db, "Feed", "http://example.com/cal.ics")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("plaintext HTTP"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_refresh_subscription_reports_http_error_status() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let feed_url = format!("{}/broken.ics", server.uri());
+        Mock::given(method("GET"))
+            .and(path("/broken.ics"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("upstream exploded"))
+            .mount(&server)
+            .await;
+
+        let db = test_db();
+        let err = refresh_subscription(&db, "Feed", &feed_url)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("status 500"), "{err}");
+        assert!(err.contains("upstream exploded"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_refresh_subscription_reports_parse_failure() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let feed_url = format!("{}/not-a-calendar.ics", server.uri());
+        Mock::given(method("GET"))
+            .and(path("/not-a-calendar.ics"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("this is not an iCalendar"))
+            .mount(&server)
+            .await;
+
+        let db = test_db();
+        let err = refresh_subscription(&db, "Feed", &feed_url)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Failed to parse ICS subscription"), "{err}");
+    }
+
+    #[test]
+    fn test_apply_calendar_empty_feed_deletes_cached_events() {
+        let db = test_db();
+        let url = "https://example.com/cal.ics";
+        apply_calendar(&db, "Feed", url, &parse_ical_text(FEED_ONE).unwrap()).unwrap();
+
+        let empty = parse_ical_text("BEGIN:VCALENDAR\nVERSION:2.0\nEND:VCALENDAR").unwrap();
+        let result = apply_calendar(&db, "Feed", url, &empty).unwrap();
+        assert_eq!(
+            (result.added, result.updated, result.unchanged, result.deleted),
+            (0, 0, 0, 2)
+        );
+        assert!(db.get_events_for_calendar(url).unwrap().is_empty());
     }
 
     #[tokio::test]
