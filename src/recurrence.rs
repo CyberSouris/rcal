@@ -689,4 +689,180 @@ mod tests {
         );
         assert_eq!(dates, vec![date(2024, 1, 29)]);
     }
+
+    #[test]
+    fn test_monthly_negative_bymonthday() {
+        let dates = occurrences(
+            &event("last-day", "FREQ=MONTHLY;BYMONTHDAY=-1;COUNT=3"),
+            date(2024, 1, 1),
+            date(2024, 6, 1),
+        );
+        // 2024 is a leap year, so February's last day is the 29th.
+        assert_eq!(
+            dates,
+            vec![date(2024, 1, 31), date(2024, 2, 29), date(2024, 3, 31)]
+        );
+    }
+
+    #[test]
+    fn test_monthly_bymonthday_and_byday_intersection() {
+        let dates = occurrences(
+            &event(
+                "intersection",
+                "FREQ=MONTHLY;BYMONTHDAY=1,5,10;BYDAY=FR;COUNT=2",
+            ),
+            date(2024, 1, 1),
+            date(2024, 5, 1),
+        );
+        // Only the 1st/5th/10th that also fall on a Friday are kept; dates
+        // before the series start (Jan 15) do not count towards COUNT.
+        assert_eq!(dates, vec![date(2024, 3, 1), date(2024, 4, 5)]);
+    }
+
+    #[test]
+    fn test_monthly_positive_ordinal_byday() {
+        let dates = occurrences(
+            &event("second-friday", "FREQ=MONTHLY;BYDAY=2FR;COUNT=3"),
+            date(2024, 1, 1),
+            date(2024, 6, 1),
+        );
+        // January's second Friday (the 12th) precedes the series start.
+        assert_eq!(
+            dates,
+            vec![date(2024, 2, 9), date(2024, 3, 8), date(2024, 4, 12)]
+        );
+    }
+
+    #[test]
+    fn test_monthly_bymonth_skips_other_months() {
+        let dates = occurrences(
+            &event("january-only", "FREQ=MONTHLY;BYMONTH=1;COUNT=2"),
+            date(2024, 1, 1),
+            date(2025, 3, 1),
+        );
+        assert_eq!(dates, vec![date(2024, 1, 15), date(2025, 1, 15)]);
+    }
+
+    #[test]
+    fn test_monthly_rolls_over_the_year() {
+        let mut event = event("december", "FREQ=MONTHLY;COUNT=3");
+        event.dtstart = Some(parse_ical_datetime("20241215T090000Z").unwrap());
+        event.dtend = Some(parse_ical_datetime("20241215T100000Z").unwrap());
+        let dates = occurrences(&event, date(2024, 12, 1), date(2025, 3, 1));
+        assert_eq!(
+            dates,
+            vec![date(2024, 12, 15), date(2025, 1, 15), date(2025, 2, 15)]
+        );
+    }
+
+    #[test]
+    fn test_weekly_wkst_changes_interval_grouping() {
+        let rule = "FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,SU;COUNT=4";
+        let monday_first = occurrences(
+            &event("wkst-monday", &format!("{rule};WKST=MO")),
+            date(2024, 1, 1),
+            date(2024, 3, 1),
+        );
+        let sunday_first = occurrences(
+            &event("wkst-sunday", &format!("{rule};WKST=SU")),
+            date(2024, 1, 1),
+            date(2024, 3, 1),
+        );
+
+        assert_eq!(
+            monday_first,
+            vec![
+                date(2024, 1, 15),
+                date(2024, 1, 21),
+                date(2024, 1, 29),
+                date(2024, 2, 4),
+            ]
+        );
+        assert_eq!(
+            sunday_first,
+            vec![
+                date(2024, 1, 15),
+                date(2024, 1, 28),
+                date(2024, 1, 29),
+                date(2024, 2, 11),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_until_date_only_includes_whole_day() {
+        let dates = occurrences(
+            &event("until-date", "FREQ=DAILY;UNTIL=20240117"),
+            date(2024, 1, 1),
+            date(2024, 1, 31),
+        );
+        assert_eq!(
+            dates,
+            vec![date(2024, 1, 15), date(2024, 1, 16), date(2024, 1, 17)]
+        );
+    }
+
+    #[test]
+    fn test_parse_weekday_and_byday_helpers() {
+        for (code, weekday) in [
+            ("MO", Weekday::Mon),
+            ("TU", Weekday::Tue),
+            ("WE", Weekday::Wed),
+            ("TH", Weekday::Thu),
+            ("FR", Weekday::Fri),
+            ("SA", Weekday::Sat),
+            ("SU", Weekday::Sun),
+        ] {
+            assert_eq!(parse_weekday(code), Some(weekday));
+            assert_eq!(parse_weekday(&code.to_ascii_lowercase()), Some(weekday));
+            assert_eq!(parse_byday(code), Some((None, weekday)));
+        }
+        assert_eq!(parse_weekday("XX"), None);
+        assert_eq!(parse_byday("0SU"), Some((None, Weekday::Sun)));
+        assert_eq!(parse_byday("-1FR"), Some((Some(-1), Weekday::Fri)));
+        assert_eq!(parse_byday("XX"), None);
+        assert_eq!(parse_byday("-1"), None);
+    }
+
+    #[test]
+    fn test_rule_parsing_is_case_insensitive_and_ignores_unknown_parts() {
+        let dates = occurrences(
+            &event(
+                "lowercase",
+                "freq=weekly;count=2;BYSETPOS=1;byday=mo",
+            ),
+            date(2024, 1, 1),
+            date(2024, 3, 1),
+        );
+        assert_eq!(dates, vec![date(2024, 1, 15), date(2024, 1, 22)]);
+    }
+
+    #[test]
+    fn test_recurring_event_without_dtstart_is_returned_unchanged() {
+        let mut event = event("no-start", "FREQ=WEEKLY");
+        event.dtstart = None;
+        event.dtend = None;
+        let expanded = expand(&event, date(2024, 1, 15), date(2024, 1, 15));
+        assert_eq!(expanded.len(), 1);
+        assert_eq!(expanded[0].dtstart, None);
+    }
+
+    #[test]
+    fn test_occurrence_without_dtend_stays_open_ended() {
+        let mut event = event("open", "FREQ=DAILY;COUNT=2");
+        event.dtend = None;
+        let expanded = expand(&event, date(2024, 1, 15), date(2024, 1, 16));
+        assert_eq!(expanded.len(), 2);
+        assert!(expanded.iter().all(|occurrence| occurrence.dtend.is_none()));
+    }
+
+    #[test]
+    fn test_negative_duration_is_clamped_to_zero() {
+        let mut event = event("backwards", "FREQ=DAILY;COUNT=2");
+        event.dtstart = Some(parse_ical_datetime("20240115T100000Z").unwrap());
+        event.dtend = Some(parse_ical_datetime("20240115T090000Z").unwrap());
+        let expanded = expand(&event, date(2024, 1, 15), date(2024, 1, 16));
+        assert_eq!(expanded.len(), 2);
+        assert_eq!(expanded[0].dtend, expanded[0].dtstart);
+    }
 }
