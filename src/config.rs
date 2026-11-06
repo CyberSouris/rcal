@@ -167,7 +167,7 @@ pub struct CalendarsConfig {
 
 impl CalendarsConfig {
     fn is_default(&self) -> bool {
-        self.show.is_empty() && self.hide.is_empty()
+        self.show.is_empty() && self.hide.is_empty() && self.default.is_none()
     }
 }
 
@@ -802,6 +802,156 @@ password_command = "echo secret"
         let legacy: Config = toml::from_str(content).unwrap();
         assert!(legacy.calendar_colors.is_empty());
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_calendars_default_roundtrips() {
+        let path = temp_config_path();
+        let mut config = Config::new("https://dav.example.com/", "alice", None);
+        config.calendars.default = Some("Work".to_string());
+        config.write_to(&path).unwrap();
+
+        // `[calendars] default` alone must not be treated as the default
+        // section, otherwise it is silently dropped when serializing.
+        let serialized = fs::read_to_string(&path).unwrap();
+        assert!(serialized.contains("[calendars]"), "{serialized}");
+        assert!(serialized.contains("default = \"Work\""), "{serialized}");
+
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.calendars.default.as_deref(), Some("Work"));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    fn calendar_names() -> Vec<String> {
+        ["Work", "Personal", "Holidays"]
+            .iter()
+            .map(|name| name.to_string())
+            .collect()
+    }
+
+    fn sorted(mut names: Vec<String>) -> Vec<String> {
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn test_default_calendar_names_without_filters_shows_all() {
+        let config = Config::default();
+        assert_eq!(
+            sorted(config.default_calendar_names(&calendar_names())),
+            sorted(calendar_names())
+        );
+    }
+
+    #[test]
+    fn test_default_calendar_names_from_show_and_hide() {
+        let names = calendar_names();
+
+        let mut show_only = Config::default();
+        show_only.calendars.show = vec!["Work".to_string(), "Personal".to_string()];
+        assert_eq!(
+            sorted(show_only.default_calendar_names(&names)),
+            vec!["Personal".to_string(), "Work".to_string()]
+        );
+
+        // An explicit `show` entry that is also hidden is removed
+        // case-insensitively.
+        let mut show_and_hide = show_only;
+        show_and_hide.calendars.hide = vec!["work".to_string()];
+        assert_eq!(
+            show_and_hide.default_calendar_names(&names),
+            vec!["Personal".to_string()]
+        );
+
+        // Hide-only starts from every known calendar.
+        let mut hide_only = Config::default();
+        hide_only.calendars.hide = vec!["holidays".to_string()];
+        assert_eq!(
+            sorted(hide_only.default_calendar_names(&names)),
+            vec!["Personal".to_string(), "Work".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_default_calendar_names_honors_calendars_default() {
+        let names = calendar_names();
+        let mut config = Config::default();
+        config.calendars.default = Some("Work".to_string());
+        assert_eq!(config.default_calendar_names(&names), vec!["Work"]);
+
+        // A default that names a group expands to its members.
+        config.calendar_groups.push(CalendarGroup {
+            name: "Team".to_string(),
+            members: vec!["Work".to_string(), "Personal".to_string()],
+        });
+        config.calendars.default = Some("team".to_string());
+        assert_eq!(
+            sorted(config.default_calendar_names(&names)),
+            vec!["Personal".to_string(), "Work".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_default_calendar_names_from_displayed_calendars() {
+        let names = calendar_names();
+        let mut config = Config::default();
+        config.display.displayed_calendars = vec!["Work".to_string(), "Holidays".to_string()];
+        assert_eq!(
+            sorted(config.default_calendar_names(&names)),
+            vec!["Holidays".to_string(), "Work".to_string()]
+        );
+
+        // `[calendars] hide` still applies to an explicit display list.
+        config.calendars.hide = vec!["Holidays".to_string()];
+        assert_eq!(config.default_calendar_names(&names), vec!["Work"]);
+    }
+
+    #[test]
+    fn test_default_calendar_names_with_operators() {
+        let names = calendar_names();
+        let mut config = Config::default();
+        config.calendar_groups.push(CalendarGroup {
+            name: "Team".to_string(),
+            members: vec!["Work".to_string(), "Personal".to_string()],
+        });
+
+        // Bare entries add, `-group` removes, `+group` re-adds, and `all`
+        // expands to every calendar.
+        config.display.displayed_calendars = vec![
+            "+team".to_string(),
+            "-Personal".to_string(),
+            "+Holidays".to_string(),
+        ];
+        assert_eq!(
+            sorted(config.default_calendar_names(&names)),
+            vec!["Holidays".to_string(), "Work".to_string()]
+        );
+
+        config.display.displayed_calendars =
+            vec!["ALL".to_string(), "-Holidays".to_string()];
+        assert_eq!(
+            sorted(config.default_calendar_names(&names)),
+            vec!["Personal".to_string(), "Work".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_group_members_lookup() {
+        let names = calendar_names();
+        let mut config = Config::default();
+        config.calendar_groups.push(CalendarGroup {
+            name: "Team".to_string(),
+            members: vec!["Work".to_string(), "Personal".to_string()],
+        });
+
+        assert_eq!(
+            config.group_members("team", &names),
+            vec!["Work".to_string(), "Personal".to_string()]
+        );
+        assert_eq!(config.group_members("ALL", &names), names);
+        // An unknown name is treated as a single calendar.
+        assert_eq!(config.group_members("Holidays", &names), vec!["Holidays"]);
     }
 
     #[cfg(unix)]
