@@ -52,6 +52,12 @@ rcal is a command-line calendar application written in Rust that synchronizes wi
 ### Basic Usage
 
 ```bash
+# Show the default view from [display] default_view (today if unset)
+rcal
+
+# Default view with calendar selectors: +group/-group (and calendar names)
+rcal +kids -work
+
 # Show today's events
 rcal today
 
@@ -84,6 +90,13 @@ rcal calendars
 ```
 
 ### Command Details
+
+#### Default view (`rcal` with no subcommand)
+Show the view configured in `[display] default_view` (`today`, `week`, or `month`).
+- Accepts the same trailing calendar selectors as the view subcommands
+  (`rcal +kids -work`), plus `--details`
+- A bare word naming no calendar or group is rejected as an unknown
+  subcommand, so typos still error out
 
 #### `today`
 Display today's events in a formatted table.

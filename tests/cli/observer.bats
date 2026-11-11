@@ -822,6 +822,80 @@ TOML
     [[ "${output}" == *"Invalid default_view 'fortnight'"* ]]
 }
 
+@test "the default view accepts calendar filters like the subcommands" {
+    sandbox
+    mkdir -p "${BATS_TEST_TMPDIR}/feed"
+    # All-day events dated today, so the default "today" view lists them
+    # without a --date the default view does not take.
+    local today
+    today="$(date +%Y%m%d)"
+    cat > "${BATS_TEST_TMPDIR}/feed/calendar.ics" <<ICS
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Feed//EN
+BEGIN:VEVENT
+UID:work-1@example.com
+SUMMARY:Work Meeting
+DTSTART:${today}
+DTEND:$(date -d "+1 day" +%Y%m%d)
+END:VEVENT
+END:VCALENDAR
+ICS
+    cat > "${BATS_TEST_TMPDIR}/feed/home.ics" <<ICS
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Feed//EN
+BEGIN:VEVENT
+UID:home-1@example.com
+SUMMARY:Home Dinner
+DTSTART:${today}
+DTEND:$(date -d "+1 day" +%Y%m%d)
+END:VEVENT
+END:VCALENDAR
+ICS
+    start_feed_server "${BATS_TEST_TMPDIR}/feed"
+
+    run "${RCAL}" subscribe "${FEED_URL}" --name Work
+    [ "$status" -eq 0 ]
+    run "${RCAL}" subscribe "http://127.0.0.1:${FEED_PORT}/home.ics" --name Home
+    [ "$status" -eq 0 ]
+
+    cat >> "$(config_file)" <<'TOML'
+[[calendar_groups]]
+name = "kids"
+members = ["Home"]
+
+[[calendar_groups]]
+name = "work"
+members = ["Work"]
+
+[display]
+default_view = "today"
+TOML
+
+    # The subcommand-less default view shows both calendars.
+    run "${RCAL}"
+    [ "$status" -eq 0 ]
+    [[ "${output}" == *"Work Meeting"* ]]
+    [[ "${output}" == *"Home Dinner"* ]]
+
+    # ... and accepts the same trailing +group/-group filters.
+    run "${RCAL}" +kids -work
+    [ "$status" -eq 0 ]
+    [[ "${output}" != *"Work Meeting"* ]]
+    [[ "${output}" == *"Home Dinner"* ]]
+
+    # A bare calendar name is also accepted.
+    run "${RCAL}" Home
+    [ "$status" -eq 0 ]
+    [[ "${output}" == *"Home Dinner"* ]]
+
+    # A bare word naming nothing is still a mistyped subcommand.
+    run "${RCAL}" frobnicate
+    [ "$status" -eq 2 ]
+    [[ "${output}" == *"unrecognized subcommand 'frobnicate'"* ]]
+}
+
 @test "the [display] accent_color tints event summaries" {
     sandbox
     write_config <<'TOML'

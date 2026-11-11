@@ -62,7 +62,12 @@ cargo test           # run the full suite (unit + mock-server tests)
   from the DB/config, not the DB colors) / `accent_color()` helpers;
   `show_month` passes `terminal_width()` (libc `TIOCGWINSZ`, 80-col
   fallback) to `render_month`; `find_event_at_time` takes
-  `Vec<&CalendarEvent>`.
+  `Vec<&CalendarEvent>`. Invoked without a subcommand, `rcal` runs
+  `run_default_view` (`[display] default_view`), which accepts the same
+  trailing `+group`/`-group` calendar selectors as the view subcommands
+  (`rcal +kids -work`); a bare top-level word naming no calendar or group
+  is rejected with clap's `unrecognized subcommand` error
+  (`validate_default_filters`/`is_known_selector`).
 - `src/config.rs` — TOML config, default paths, `write_to` (used by
   `rcal add-account`). `Config::servers` is a `Vec<ServerConfig>`; a legacy
   single `[server]` table is accepted on load and merged into `servers` at

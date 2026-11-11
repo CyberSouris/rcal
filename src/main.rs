@@ -36,6 +36,11 @@ struct Cli {
     /// Show all details of each event (applies to default view)
     #[arg(long)]
     details: bool,
+
+    /// Calendar filters for the default view: +group/-group (and calendar
+    /// names); only used when no subcommand is given
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    filters: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -435,7 +440,7 @@ async fn main() -> anyhow::Result<()> {
             password_command,
             force,
         }) => handle_add_account(url, username, password_command, force),
-        None => run_default_view(global_details),
+        None => run_default_view(global_details, cli.filters),
     }
 }
 
@@ -714,20 +719,86 @@ fn show_month(
 
 /// Handle `rcal` invoked without a subcommand: show the default view
 /// configured in `[display] default_view` (today if no config file exists).
-fn run_default_view(details: bool) -> anyhow::Result<()> {
-    let default_view = config::Config::load()
-        .map(|c| c.display.default_view)
-        .unwrap_or_else(|_| "today".to_string());
+///
+/// The top level accepts trailing calendar filters, so `rcal +kids -work`
+/// filters the default view without naming a subcommand.
+fn run_default_view(details: bool, filters: Vec<String>) -> anyhow::Result<()> {
+    let config = config::Config::load().ok();
+    let default_view = config
+        .as_ref()
+        .map(|c| c.display.default_view.clone())
+        .unwrap_or_else(|| "today".to_string());
+
+    // A bare word that names no calendar or group is almost certainly a
+    // mistyped subcommand; reject it exactly as clap would.
+    let calendar_names: Vec<String> = db::Database::open()?
+        .get_calendars()?
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
+    validate_default_filters(config.as_ref(), &calendar_names, &filters)?;
 
     match default_view.as_str() {
-        "today" => show_day(Local::now().date_naive(), None, details, Vec::new()),
-        "week" => show_week(None, 0, false, details, Vec::new()),
-        "month" => show_month(None, 0, false, details, Vec::new()),
+        "today" => show_day(Local::now().date_naive(), None, details, filters),
+        "week" => show_week(None, 0, false, details, filters),
+        "month" => show_month(None, 0, false, details, filters),
         other => anyhow::bail!(
             "Invalid default_view '{}' in config; expected one of: today, week, month.",
             other
         ),
     }
+}
+
+/// Reject top-level default-view filters that are bare words matching no
+/// calendar or group. Tokens carrying a `+`/`-` operator are always accepted
+/// (an unknown one simply selects nothing, as in the `today`/`week`/`month`
+/// subcommands); only operator-less tokens can be confused with a subcommand.
+fn validate_default_filters(
+    config: Option<&config::Config>,
+    calendar_names: &[String],
+    filters: &[String],
+) -> anyhow::Result<()> {
+    for token in filters {
+        if token.starts_with('+') || token.starts_with('-') {
+            continue;
+        }
+        if !is_known_selector(config, calendar_names, token) {
+            reject_unknown_subcommand(token);
+        }
+    }
+    Ok(())
+}
+
+/// Whether a bare filter token names a calendar, a `[[calendar_groups]]`
+/// entry, or the special `all` group.
+fn is_known_selector(
+    config: Option<&config::Config>,
+    calendar_names: &[String],
+    token: &str,
+) -> bool {
+    token.eq_ignore_ascii_case("all")
+        || calendar_names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(token))
+        || config
+            .map(|cfg| {
+                cfg.calendar_groups
+                    .iter()
+                    .any(|group| group.name.eq_ignore_ascii_case(token))
+            })
+            .unwrap_or(false)
+}
+
+/// Exit with clap's `unrecognized subcommand` error (and exit code 2) for a
+/// token that was parsed as a default-view filter but names nothing.
+fn reject_unknown_subcommand(token: &str) -> ! {
+    use clap::CommandFactory;
+    Cli::command()
+        .error(
+            clap::error::ErrorKind::InvalidSubcommand,
+            format!("unrecognized subcommand '{token}'"),
+        )
+        .exit()
 }
 
 /// Parse the `show` date argument which may be `YYYY-MM-DD` or `YYYY-MM-DD@HH:MM`.
@@ -2380,6 +2451,86 @@ mod tests {
             ids(allowed_calendar_ids(None, &db, &["Missing".to_string()])),
             vec!["id-holidays", "id-home", "id-work"]
         );
+    }
+
+    // --- default-view filters ---------------------------------------------
+
+    fn parse_cli(args: &[&str]) -> Cli {
+        Cli::try_parse_from(std::iter::once("rcal").chain(args.iter().copied())).unwrap()
+    }
+
+    #[test]
+    fn test_cli_parses_default_view_filters() {
+        let cli = parse_cli(&["+kids", "-work"]);
+        assert!(cli.command.is_none());
+        assert_eq!(cli.filters, vec!["+kids".to_string(), "-work".to_string()]);
+        assert!(!cli.details);
+    }
+
+    #[test]
+    fn test_cli_flags_before_default_view_filters() {
+        let cli = parse_cli(&["--details", "+kids"]);
+        assert!(cli.command.is_none());
+        assert!(cli.details);
+        assert_eq!(cli.filters, vec!["+kids".to_string()]);
+    }
+
+    #[test]
+    fn test_cli_subcommand_takes_precedence_over_filters() {
+        let cli = parse_cli(&["today", "+kids"]);
+        match cli.command {
+            Some(Commands::Today { filters, .. }) => {
+                assert_eq!(filters, vec!["+kids".to_string()]);
+            }
+            _ => panic!("expected the today subcommand to take precedence"),
+        }
+        assert!(cli.filters.is_empty());
+    }
+
+    #[test]
+    fn test_validate_default_filters_accepts_operators_and_known_names() {
+        let names = vec!["Work".to_string(), "Home".to_string()];
+        let toks = |v: &[&str]| -> Vec<String> { v.iter().map(|s| s.to_string()).collect() };
+        let mut config = config::Config::default();
+        config.calendar_groups.push(config::CalendarGroup {
+            name: "kids".to_string(),
+            members: vec!["Home".to_string()],
+        });
+
+        // Operator tokens can never be confused with a subcommand, so they
+        // are always accepted — even when they name nothing.
+        validate_default_filters(
+            Some(&config),
+            &names,
+            &toks(&["+kids", "-work", "+nope", "-nope"]),
+        )
+        .unwrap();
+
+        // Bare words are accepted when they name a calendar (case-blind), a
+        // group, or the special `all` group.
+        validate_default_filters(Some(&config), &names, &toks(&["Home"])).unwrap();
+        validate_default_filters(Some(&config), &names, &toks(&["home"])).unwrap();
+        validate_default_filters(Some(&config), &names, &toks(&["kids"])).unwrap();
+        validate_default_filters(None, &names, &toks(&["all"])).unwrap();
+        validate_default_filters(Some(&config), &[], &[]).unwrap();
+    }
+
+    #[test]
+    fn test_is_known_selector_matches_calendars_groups_and_all() {
+        let names = vec!["Work".to_string(), "Home".to_string()];
+        let mut config = config::Config::default();
+        config.calendar_groups.push(config::CalendarGroup {
+            name: "kids".to_string(),
+            members: vec!["Home".to_string()],
+        });
+
+        assert!(is_known_selector(Some(&config), &names, "home"));
+        assert!(is_known_selector(Some(&config), &names, "kids"));
+        assert!(is_known_selector(Some(&config), &names, "ALL"));
+        assert!(!is_known_selector(Some(&config), &names, "frobnicate"));
+        assert!(!is_known_selector(None, &names, "kids"));
+        assert!(is_known_selector(None, &names, "Work"));
+        assert!(is_known_selector(None, &[], "all"));
     }
 
     #[test]
