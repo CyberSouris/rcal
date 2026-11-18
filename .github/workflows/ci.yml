@@ -57,7 +57,7 @@ jobs:
           git clone --depth 1 --branch v1.11.1 \
             https://github.com/bats-core/bats-core /tmp/batscore
           /tmp/batscore/install.sh /tmp/batscli
-          rustup component add llvm-tools-preview
+          rustup component add llvm-tools-preview || rustup component add llvm-tools
 
       - name: Build binary and unit-test harness instrumented for coverage
         run: |
@@ -80,13 +80,23 @@ jobs:
           set -euo pipefail
           COV="$HOME/.rustup/toolchains/$(rustup show active-toolchain | cut -d' ' -f1)/lib/rustlib/x86_64-unknown-linux-gnu/bin"
           mkdir -p target/coverage
-          "$COV/llvm-profdata" merge -sparse /tmp/batsprof/*.profraw \
+          shopt -s nullglob
+          profraws=(/tmp/batsprof/*.profraw)
+          if [ "${#profraws[@]}" -eq 0 ]; then
+            echo "No .profraw files found in /tmp/batsprof" >&2
+            exit 1
+          fi
+          "$COV/llvm-profdata" merge -sparse "${profraws[@]}" \
             -o /tmp/rcal.profdata
-          TESTBIN="$(find target/debug/deps -maxdepth 1 -type f -perm -u+x -name 'rcal-*' | head -n1)"
+          TESTBIN="$(find target/debug/deps -maxdepth 1 -type f -executable -name 'rcal-*' -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-)"
+          if [ -z "${TESTBIN}" ] || [ ! -x "${TESTBIN}" ]; then
+            echo "Could not locate instrumented rcal test binary in target/debug/deps" >&2
+            exit 1
+          fi
           "$COV/llvm-cov" export --format lcov \
             --instr-profile /tmp/rcal.profdata \
             --object ./target/debug/rcal \
-            --object "$TESTBIN" \
+            --object "${TESTBIN}" \
             > target/coverage/merged.lcov
 
       - name: Upload coverage to Codecov
