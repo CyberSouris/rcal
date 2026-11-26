@@ -1752,12 +1752,12 @@ fn parse_date(s: &str) -> anyhow::Result<NaiveDate> {
     if let Ok(date) = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
         return Ok(date);
     }
-    parse_date_at(trimmed, jiff::Zoned::now())
+    parse_date_at(trimmed, jiff::ZonedDateTime::now())
 }
 
 /// Natural-language portion of `parse_date`, with an injectable "now" so the
 /// relative expressions can be tested deterministically.
-fn parse_date_at(s: &str, now: jiff::Zoned) -> anyhow::Result<NaiveDate> {
+fn parse_date_at(s: &str, now: jiff::ZonedDateTime) -> anyhow::Result<NaiveDate> {
     let trimmed = s.trim();
     if let Ok(date) = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
         return Ok(date);
@@ -2085,7 +2085,7 @@ mod tests {
         assert!(err.to_string().contains("YYYY-MM-DD"));
     }
 
-    fn test_now() -> jiff::Zoned {
+    fn test_now() -> jiff::ZonedDateTime {
         "2024-01-15T12:00:00Z[UTC]".parse().unwrap()
     }
 
@@ -2692,7 +2692,7 @@ mod tests {
     fn test_parsed_datetime_date_variants() {
         use parse_datetime::ParsedDateTime;
 
-        let in_range: jiff::Zoned = "2024-05-06T12:00:00Z[UTC]".parse().unwrap();
+        let in_range: jiff::ZonedDateTime = "2024-05-06T12:00:00Z[UTC]".parse().unwrap();
         assert_eq!(
             parsed_datetime_date(ParsedDateTime::InRange(in_range)),
             Some(test_date("2024-05-06"))

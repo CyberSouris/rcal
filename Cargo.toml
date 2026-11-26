@@ -10,8 +10,8 @@ license = "GPL-3.0"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 chrono = { version = "0.4", features = ["serde"] }
-parse_datetime = "0.17"
-jiff = "0.2"
+parse_datetime = "0.18"
+jiff = "1.0"
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
 dirs = "7"
